@@ -9,6 +9,7 @@
     python main_bokmu.py --type 조퇴 --date 2026-07-10 --start 15:00 --end 16:20 --reason "개인 사유"
     python main_bokmu.py --type 외출 --date 2026-07-10 --start 10:00 --end 11:00 --reason "은행 업무" --dry-run
     python main_bokmu.py --type 병조퇴 --date 2026-09-21 --start 15:50 --end 16:20 --reason "감기(OO내과 진료)"
+    python main_bokmu.py --type 41조연수 --date 2026-12-28 --end-date 2026-12-31 --destination "자택" --reason "수업연구 및 자율연수" --dry-run
 """
 import argparse
 import os
@@ -28,7 +29,11 @@ import main as neis  # 로그인/알림팝업 로직 재사용
 SITTN_PARENT = {
     "지각": "연가", "조퇴": "연가", "외출": "연가",
     "병지각": "병가", "병조퇴": "병가", "병외출": "병가",
+    # 방학 중 교육공무원법 제41조 연수 — 대분류 «연수» 를 고르면 소분류가
+    # «교육공무원법제41조연수» 로 저절로 채워진다. 소분류는 건드리지 않는다. 종일이라 시각도 안 건드린다.
+    "41조연수": "연수",
 }
+TRAINING_TYPE = "41조연수"
 WORK_SITTN_TYPES = set(SITTN_PARENT)
 CLOSE_CONFIRM_TEXT = "윈도우창을 닫으시겠습니까?"
 MINUTE_STEP = 5  # 시작/종료 '분' 콤보박스는 5분 단위로만 선택 가능
@@ -192,12 +197,13 @@ async def fill_work_sittn_form(
     end_hm: str,
     reason: str,
     contact: str | None,
+    end_d: date | None = None,
+    destination: str | None = None,
 ):
+    is_training = sittn_type == TRAINING_TYPE
     date_str = d.strftime("%Y-%m-%d")
-    start_hm = round_to_step(start_hm)
-    end_hm = round_to_step(end_hm)
-    sh, sm = start_hm.split(":")
-    eh, em = end_hm.split(":")
+    end_date_str = (end_d or d).strftime("%Y-%m-%d")
+    sub_combo = dialog.locator('[role="combobox"][aria-label^="근무상황소분류"]').first
 
     # 1) 근무상황대분류 → 소분류. 대분류 기본값은 '연가'라 병가 쪽일 때만 바꾼다.
     #    대분류를 바꾸면 소분류 목록과 시각 기본값이 다시 그려지므로 잠깐 기다린다.
@@ -206,24 +212,27 @@ async def fill_work_sittn_form(
         main_combo = dialog.locator('[role="combobox"][aria-label^="근무상황대분류"]').first
         await select_combo_option(page, main_combo, parent)
         await page.wait_for_timeout(1200)
-    sub_combo = dialog.locator('[role="combobox"][aria-label^="근무상황소분류"]').first
-    await select_combo_option(page, sub_combo, sittn_type)
+    if not is_training:      # 41조는 소분류가 저절로 채워진다 — 건드리지 않는다
+        await select_combo_option(page, sub_combo, sittn_type)
 
-    # 2) 기간 시작/종료일자
+    # 2) 기간 시작/종료일자 (41조만 종료일이 다를 수 있다)
     start_date_input = dialog.locator('input[aria-label="신청기간 시작일자"]').first
     await fill_text_input(page, start_date_input, date_str)
     end_date_input = dialog.locator('input[aria-label="신청기간 종료일자"]').first
-    await fill_text_input(page, end_date_input, date_str)
+    await fill_text_input(page, end_date_input, end_date_str if is_training else date_str)
 
-    # 3) 시작/종료 시·분
-    start_h_combo = dialog.locator('[role="combobox"][aria-label^="시작 시"]').first
-    await select_combo_option(page, start_h_combo, sh)
-    start_m_combo = dialog.locator('[role="combobox"][aria-label^="시작 분"]').first
-    await select_combo_option(page, start_m_combo, sm)
-    end_h_combo = dialog.locator('[role="combobox"][aria-label^="종료 시"]').first
-    await select_combo_option(page, end_h_combo, eh)
-    end_m_combo = dialog.locator('[role="combobox"][aria-label^="종료 분"]').first
-    await select_combo_option(page, end_m_combo, em)
+    # 3) 시작/종료 시·분 — 41조는 종일이라 건드리지 않는다
+    if not is_training:
+        sh, sm = round_to_step(start_hm).split(":")
+        eh, em = round_to_step(end_hm).split(":")
+        start_h_combo = dialog.locator('[role="combobox"][aria-label^="시작 시"]').first
+        await select_combo_option(page, start_h_combo, sh)
+        start_m_combo = dialog.locator('[role="combobox"][aria-label^="시작 분"]').first
+        await select_combo_option(page, start_m_combo, sm)
+        end_h_combo = dialog.locator('[role="combobox"][aria-label^="종료 시"]').first
+        await select_combo_option(page, end_h_combo, eh)
+        end_m_combo = dialog.locator('[role="combobox"][aria-label^="종료 분"]').first
+        await select_combo_option(page, end_m_combo, em)
 
     # 4) 연락처 (선택 입력)
     if contact:
@@ -233,6 +242,18 @@ async def fill_work_sittn_form(
     # 5) 사유 또는 용무 (연가사유 드롭다운은 기본값 '선택' 그대로 둠 — 경조사 등 특수 법정사유 전용)
     reason_input = dialog.locator('input[aria-label="사유 또는 용무"]').first
     await fill_text_input(page, reason_input, reason)
+
+    # 6) 목적지 (41조 연수 — 예: 자택)
+    if destination:
+        dest_input = dialog.locator('input[aria-label="목적지"]').first
+        await fill_text_input(page, dest_input, destination)
+
+    # 7) 41조면 소분류가 정말 41조로 채워졌는지 읽어서 확인한다 (다른 연수로 올라가면 안 된다)
+    if is_training:
+        sub_text = norm_text(await sub_combo.inner_text())
+        print(f"🔎  근무상황소분류 = {sub_text}")
+        if "41조" not in sub_text:
+            raise RuntimeError(f"근무상황소분류가 41조 연수가 아닙니다: '{sub_text}'")
 
 
 # '상신' 뒤에 떠도 되는 팝업. 이 문구가 없는 팝업은 누르지 않는다.
@@ -481,6 +502,9 @@ async def run(args):
     if not contact:
         print("❌  연락처가 없습니다. --contact 로 주거나 설정 파일의 contact 값을 채우세요.")
         sys.exit(1)
+    is_training = args.type == TRAINING_TYPE
+    if not args.approval_line and is_training:
+        args.approval_line = cfg.get("training_approval_line")   # 41조는 결재선이 따로인 학교가 많다
     if not args.approval_line:
         args.approval_line = cfg.get("approval_line")
     if not args.approval_line:
@@ -491,6 +515,17 @@ async def run(args):
     d = date.fromisoformat(args.date)
     if args.type not in WORK_SITTN_TYPES:
         print(f"❌  지원하지 않는 근무상황: {args.type} (지원: {', '.join(WORK_SITTN_TYPES)})")
+        sys.exit(1)
+    end_d = date.fromisoformat(args.end_date) if args.end_date else d
+    if end_d < d:
+        print(f"❌  종료일({end_d})이 시작일({d})보다 앞입니다.")
+        sys.exit(1)
+    if is_training:
+        if not args.destination:
+            print("❌  41조 연수는 목적지가 필요합니다. --destination 으로 주세요 (예: 자택).")
+            sys.exit(1)
+    elif not (args.start and args.end):
+        print(f"❌  {args.type} 은(는) 시작·종료 시각이 필요합니다. --start, --end 로 주세요.")
         sys.exit(1)
 
     async with async_playwright() as p:
@@ -568,8 +603,13 @@ async def run(args):
                 end_hm=args.end,
                 reason=args.reason,
                 contact=contact,
+                end_d=end_d,
+                destination=args.destination,
             )
-            print(f"✅  폼 입력 완료: {args.type} {d} {args.start}~{args.end} 사유='{args.reason}'")
+            if is_training:
+                print(f"✅  폼 입력 완료: {args.type} {d}~{end_d} 목적지='{args.destination}' 사유='{args.reason}'")
+            else:
+                print(f"✅  폼 입력 완료: {args.type} {d} {args.start}~{args.end} 사유='{args.reason}'")
 
             await page.screenshot(path="bokmu_form_filled.png")
             print("📸  스크린샷 저장: bokmu_form_filled.png")
@@ -616,10 +656,12 @@ async def run(args):
 
 def main():
     parser = argparse.ArgumentParser(description="나이스 복무(근무상황) 자동 상신")
-    parser.add_argument("--type", required=True, choices=sorted(WORK_SITTN_TYPES), help="조퇴·외출·지각(연가) / 병조퇴·병외출·병지각(병가, 질병)")
-    parser.add_argument("--date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--start", required=True, help="시작 시각 HH:MM")
-    parser.add_argument("--end", required=True, help="종료 시각 HH:MM")
+    parser.add_argument("--type", required=True, choices=sorted(WORK_SITTN_TYPES), help="조퇴·외출·지각(연가) / 병조퇴·병외출·병지각(병가, 질병) / 41조연수(연수, 종일)")
+    parser.add_argument("--date", required=True, help="YYYY-MM-DD (41조면 시작일)")
+    parser.add_argument("--end-date", default=None, help="41조 연수 종료일 YYYY-MM-DD (없으면 --date 와 같은 날)")
+    parser.add_argument("--start", default=None, help="시작 시각 HH:MM (41조 말고는 필수)")
+    parser.add_argument("--end", default=None, help="종료 시각 HH:MM (41조 말고는 필수)")
+    parser.add_argument("--destination", default=None, help="목적지 (41조 연수면 필수, 예: 자택)")
     parser.add_argument("--reason", required=True, help="사유 또는 용무")
     parser.add_argument("--contact", default=None, help="연락처 (선택, 예: 010-1234-5678)")
     parser.add_argument(

@@ -3,7 +3,8 @@
 
   .\\.venv\\Scripts\\pythonw.exe widget\\바로가기위젯.pyw      (설정하면 바탕화면 바로가기가 생긴다)
 
-  [나이스] [에듀파인] [문서등록대장] [공람] [검수] [복무]  — 앞의 넷은 누르면 인증서 자동 로그인까지 해서 그 화면을 맨 앞에 띄운다.
+  [나이스] [출결] [출결마감] [에듀파인] [학교회계] [문서등록대장] [공람] [검수] [복무]  — 나이스·에듀파인·학교회계·문서등록대장·공람은 누르면 인증서 자동 로그인까지 해서 그 화면을 맨 앞에 띄운다.
+  [학교회계]: 업무를 «학교회계» 로 바꿔 품의/정산 > 품의등록 빈 화면을 열고 제목·개요 틀(설정 punui_title·punui_body)만 채운다. 저장은 안 한다.
   [검수]: 밀린 검사검수 건을 조회해 목록을 보여 주고, [등록하기]를 눌러야 등록한다 (edufine_inspect.py --go).
   [복무]: 작은 창에서 종류(조퇴·외출·지각·병조퇴·병외출·병지각)·날짜·시각·사유를 고르고 [상신]을 누르면 나이스에 승인요청까지 올린다
           (main_bokmu.py). 종료 시각 기본값은 설정의 «퇴근 시각»(학교마다 다르다 — 처음 설정에서 묻는다).
@@ -43,12 +44,18 @@ RELAUNCH_EVERY = 60 * 1000      # 크롬을 닫았으면 1분 안에 다시 최�
 PORTS = {"neis": 9322, "edufine": 9324}
 
 BG, INK, LINE = "#fffaf2", "#3b2f25", "#d9ccb8"
-BTNS = [("나이스", "neis", "open", "#1b6fb5"), ("에듀파인", "edufine", "main", "#2f7d4f"),
+BTNS = [("나이스", "neis", "open", "#1b6fb5"),
+        ("출결", "attend", "form", "#2a6fdb"), ("출결마감", "monthclose", "form", "#7a5a1f"),   # 나이스 일 — 나이스 바로 옆 (11/18 선생님 요청)
+        ("에듀파인", "edufine", "main", "#2f7d4f"),
+        ("학교회계", "edufine", "punui", "#1f7a7a"),      # 학교회계 → 품의등록 빈 화면 + 제목·개요 틀 (저장 안 함)
         ("문서등록대장", "edufine", "open", "#8a5a2b"), ("공람", "edufine", "cnrs", "#6b4fb5"),
         ("검수", "inspect", "check", "#d63a30"), ("복무", "bokmu", "form", "#c2417a")]
+ATTEND = HERE.parent / "attendance_quick.py"       # 키트의 «한 줄 문장 → 일일출결관리» (풀이 / 넣기 / 명단)
+MONTH_CLOSE = HERE.parent / "month_close.py"       # 키트의 월 출결마감 (일마감 + 월마감 한 번에)
 INSPECT = HERE.parent / "edufine_inspect.py"      # 키트의 물품 검사검수 (조회만 / --go 등록)
 BOKMU = HERE.parent / "main_bokmu.py"             # 키트의 복무(근무상황) 상신
-BOKMU_TYPES = ["조퇴", "외출", "지각", "병조퇴", "병외출", "병지각"]
+OVERTIME = HERE.parent / "main_overtime.py"         # 키트의 초과근무(평일 시간외) 상신
+BOKMU_TYPES = ["조퇴", "외출", "지각", "병조퇴", "병외출", "병지각", "41조연수", "초과근무"]
 MUTEX = "neis-edufine-widget"
 SHOW_EVENT, ACK_EVENT = "neis-edufine-widget-show", "neis-edufine-widget-shown"   # 바로가기를 또 누르면 «앞으로 나와» / «나왔어»
 GUARD_EVERY = 5                 # tick(0.4초) 다섯 번마다 = 2초마다 «보이나·화면 안인가·맨 위인가» 확인
@@ -308,6 +315,7 @@ class Widget:
         self.prewarm_var = tk.BooleanVar(value=self.prewarm)
         self.m.add_checkbutton(label="미리 열어두기 (빠른 클릭)", variable=self.prewarm_var, command=self.toggle_prewarm)
         self.m.add_command(label="지금 미리 열어두기", command=lambda: self.warm_all(True))
+        self.m.add_command(label="반 명단 다시 읽기 (출결용)", command=self.attend_roster)
         self.m.add_separator()
         self.m.add_command(label="위젯용 크롬 창 닫기", command=self.close_chrome)
         self.m.add_command(label="위젯 끄기", command=self.root.destroy)
@@ -426,6 +434,12 @@ class Widget:
         if site == "bokmu":
             self.bokmu_form()
             return
+        if site == "attend":
+            self.attend_form()
+            return
+        if site == "monthclose":
+            self.close_form()
+            return
         self.busy = text + " 여는 중"
 
         def fn():
@@ -494,6 +508,196 @@ class Widget:
             self.root.after(0, self.info, msg)
         threading.Thread(target=fn, daemon=True).start()
 
+    # ── 출결 (한 줄 문장 → 일일출결관리) ──
+    def run_kit(self, script, args, what, timeout=900):
+        """키트 스크립트를 돌려 RESULT_JSON(= 또는 공백 뒤)을 돌려준다. 나이스 작업끼리는 겹치지 않게 neis 자물쇠."""
+        t0 = time.time()
+        with self.locks["neis"]:
+            p = subprocess.run([str(PY), "-X", "utf8", str(script), *args], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", env=ENV, cwd=str(script.parent),
+                               creationflags=NO_WINDOW, timeout=timeout)
+        lines = (p.stdout or "").splitlines() + (p.stderr or "").splitlines()
+        res = next((ln.split("RESULT_JSON", 1)[1].lstrip("= ") for ln in reversed(lines) if ln.startswith("RESULT_JSON")), "")
+        log(what, ["READY " + res[:80] if res else "FAIL " + " ".join(lines[-3:])[:120]], t0)
+        try:
+            return json.loads(res), lines
+        except Exception:
+            return None, lines
+
+    def attend_form(self, text=None, note=""):
+        """출결 문장 창. 적은 문장은 지우지 않는다 — 고칠 곳이 있거나 [닫기]를 눌러도 다음에 그대로 다시 뜬다.
+        다 저장된 뒤에만 비운다 (11/18 선생님 요청)."""
+        if text is None:
+            text = getattr(self, "attend_text", "")
+        tip, fr = self.popup("출결 — 한 줄에 한 학생. 예) 홍길동 질병지각 4교시 이후 등교\n"
+                             "[풀어 보기]를 누르면 어떻게 읽었는지 먼저 보여 드리고, [나이스에 넣기]를 눌러야 들어갑니다.")
+        if note:
+            tk.Label(fr, text=note, bg=BG, fg="#c0392b", font=("Malgun Gothic", 9), justify="left",
+                     wraplength=420).pack(padx=12, pady=(0, 4), anchor="w")
+        box = tk.Text(fr, font=("Malgun Gothic", 10), width=46, height=4, wrap="word")
+        box.pack(padx=12, pady=(0, 4))
+        if text:
+            box.insert("1.0", text)
+
+        def keep():
+            self.attend_text = box.get("1.0", "end").strip()
+        tk.Label(fr, text="분류: 질병·미인정·출석인정(체험학습) · 종류: 결석·지각·조퇴\n"
+                          "지각 «4교시 이후 등교»=1~4교시 빠짐 · «3교시에 등교»=1~2교시 빠짐 · 조퇴 «4교시 이후 조퇴»=5교시부터\n"
+                          "날짜를 안 적으면 오늘 · «어제» «11/17» · 결석 기간 «11/17~11/19»",
+                 bg=BG, fg="#8a7a68", font=("Malgun Gothic", 8), justify="left", wraplength=420).pack(padx=12, anchor="w")
+        btns = tk.Frame(fr, bg=BG)
+        btns.pack(pady=(4, 10))
+
+        def go():
+            keep()
+            if not self.attend_text:
+                self.say("출결 문장을 적어 주세요", "#c0392b", 4000)
+                return
+            tip.destroy()
+            self.attend_parse(self.attend_text)
+
+        def close():
+            keep()                                  # 닫아도 적은 문장은 남겨 둔다
+            tip.destroy()
+
+        def clear():
+            box.delete("1.0", "end")
+            self.attend_text = ""
+            box.focus_set()
+        tk.Button(btns, text="풀어 보기", font=("Malgun Gothic", 9, "bold"), bg="#2a6fdb", fg="white", relief="flat",
+                  padx=12, command=go).pack(side="left", padx=4)
+        tk.Button(btns, text="지우기", font=("Malgun Gothic", 9), relief="flat", padx=10, command=clear).pack(side="left", padx=4)
+        tk.Button(btns, text="닫기", font=("Malgun Gothic", 9), relief="flat", padx=10, command=close).pack(side="left", padx=4)
+        box.focus_set()
+        box.mark_set("insert", "end")
+
+    def attend_parse(self, text):
+        self.busy = "출결 문장 읽는 중"
+
+        def fn():
+            try:
+                r, lines = self.run_kit(ATTEND, ["풀이", text], "attend parse", timeout=60)
+            finally:
+                self.busy = None
+            self.root.after(0, self.attend_show, text, r, lines)
+        threading.Thread(target=fn, daemon=True).start()
+
+    def attend_show(self, text, r, lines):
+        if r is None:
+            self.attend_form(text, "앗, 문장을 못 풀었어요: " + " ".join(lines[-2:])[:200])
+            return
+        ok_lines = "\n".join("• " + x["요약"] for x in r.get("풀이", []))
+        ask = "\n".join("❓ «%s» — %s" % (x["문장"], x["이유"]) for x in r.get("물을것", []))
+        if ask:                                     # 문장을 그대로 다시 띄워 고칠 곳만 고치게
+            self.attend_form(text, ("이렇게 읽었어요:\n" + ok_lines + "\n" if ok_lines else "") + ask
+                             + "\n아래 문장에서 고칠 곳만 고쳐 다시 [풀어 보기]를 눌러 주세요. (아무것도 넣지 않았어요)")
+            return
+        tip, fr = self.popup("이렇게 나이스 일일출결관리에 넣고 저장합니다:\n\n" + ok_lines
+                             + "\n\n맞으면 [나이스에 넣기]. 틀렸으면 [고치기] — 적은 문장이 그대로 다시 뜹니다.")
+        btns = tk.Frame(fr, bg=BG)
+        btns.pack(pady=(0, 10))
+        tk.Button(btns, text="나이스에 넣기", font=("Malgun Gothic", 9, "bold"), bg="#2a6fdb", fg="white", relief="flat",
+                  padx=12, command=lambda: (tip.destroy(), self.attend_enter(text))).pack(side="left", padx=4)
+        tk.Button(btns, text="고치기", font=("Malgun Gothic", 9), relief="flat", padx=10,
+                  command=lambda: (tip.destroy(), self.attend_form(text))).pack(side="left", padx=4)
+        tk.Button(btns, text="닫기", font=("Malgun Gothic", 9), relief="flat", padx=10, command=tip.destroy).pack(side="left", padx=4)
+
+    def attend_enter(self, text):
+        self.busy = "출결 넣는 중"
+
+        def fn():
+            try:
+                r, lines = self.run_kit(ATTEND, ["넣기", text], "attend enter")
+            finally:
+                self.busy = None
+            if r is None:
+                self.root.after(0, self.info, "앗, 결과를 못 받았어요. 나이스 일일출결관리에서 직접 확인해 주세요.\n\n"
+                                + "\n".join(lines[-4:])[:400])
+                return
+            got = "\n".join("• %s %s번: %s" % (x["날짜"][5:], x["번호"], x.get("줄") or "(줄을 못 읽음)") for x in r.get("확인", []))
+            bad = "\n".join("❌ %s %s번: %s" % (x["날짜"][5:], x["번호"], x["이유"][:90]) for x in r.get("실패", []))
+            if r.get("ok"):
+                self.attend_text = ""               # 다 들어갔을 때만 문장을 비운다
+                self.root.after(0, self.info, "출결 저장 끝 — 나이스에서 다시 읽은 줄:\n\n" + got)
+            else:                                   # 문장은 남겨 둔다 — [출결]을 다시 누르면 그대로 뜬다
+                self.root.after(0, self.info, "일부가 안 들어갔어요:\n\n" + got + ("\n\n" + bad if bad else "")
+                                + "\n\n적은 문장은 남겨 두었어요. [출결]을 다시 누르면 그대로 뜹니다.\n"
+                                  "(이미 들어간 학생은 문장에서 그 줄만 지우고 다시 넣으세요 — 두 번 넣지 않게)")
+        threading.Thread(target=fn, daemon=True).start()
+
+    def attend_roster(self):
+        if self.busy:
+            return
+        self.busy = "반 명단 읽는 중"
+
+        def fn():
+            try:
+                r, lines = self.run_kit(ATTEND, ["명단"], "attend roster")
+            finally:
+                self.busy = None
+            if r and r.get("ok"):
+                self.root.after(0, self.say, "반 명단 %d명 읽었어요" % r.get("명수", 0), "#2f7d4f", 6000)
+            else:
+                self.root.after(0, self.info, "앗, 반 명단을 못 읽었어요.\n\n" + ((r or {}).get("error") or "\n".join(lines[-3:]))[:300])
+        threading.Thread(target=fn, daemon=True).start()
+
+    # ── 마감 (월 출결마감: 일마감 + 월마감 한 번에) ──
+    def close_form(self):
+        t = datetime.now()
+        prev = (t.replace(day=1) - timedelta(days=1))
+        default = t if t.day >= 25 else prev          # 말일 무렵이면 이번 달, 아니면 지난달
+        tip, fr = self.popup("월 출결마감 — 그 달의 일마감(한 번에)과 월마감을 합니다.\n"
+                             "[상태 보기]는 아무것도 누르지 않고 마감 상태만 읽습니다.")
+        g = tk.Frame(fr, bg=BG)
+        g.pack(padx=12, anchor="w")
+        tk.Label(g, text="달", bg=BG, fg=INK, font=("Malgun Gothic", 9)).pack(side="left")
+        v = tk.StringVar(value=default.strftime("%Y-%m"))
+        tk.Entry(g, textvariable=v, font=("Malgun Gothic", 10), width=9).pack(side="left", padx=8)
+        btns = tk.Frame(fr, bg=BG)
+        btns.pack(pady=(8, 10))
+
+        def run(commit):
+            ym = v.get().strip()
+            if not re.fullmatch(r"\d{4}-\d{1,2}", ym):
+                self.say("달은 2026-10 처럼 적어 주세요", "#c0392b", 5000)
+                return
+            tip.destroy()
+            if commit:
+                self.confirm("%s 일마감 + 월마감을 합니다.\n마감한 날은 출결을 더 넣을 수 없어요 (나이스에서 마감취소 해야 함).\n"
+                             "그 달 출결을 다 넣으셨으면 [마감하기]." % ym, "마감하기", lambda: self.close_run(ym, True))
+            else:
+                self.close_run(ym, False)
+        tk.Button(btns, text="상태 보기", font=("Malgun Gothic", 9), relief="flat", padx=10, command=lambda: run(False)).pack(side="left", padx=4)
+        tk.Button(btns, text="마감하기", font=("Malgun Gothic", 9, "bold"), bg="#7a5a1f", fg="white", relief="flat",
+                  padx=12, command=lambda: run(True)).pack(side="left", padx=4)
+        tk.Button(btns, text="닫기", font=("Malgun Gothic", 9), relief="flat", padx=10, command=tip.destroy).pack(side="left", padx=4)
+
+    def close_run(self, ym, commit):
+        self.busy = "%s 마감 중" % ym if commit else "%s 마감 상태 보는 중" % ym
+
+        def fn():
+            try:
+                r, lines = self.run_kit(MONTH_CLOSE, [ym] + (["--close"] if commit else []), "monthclose %s%s" % (ym, " --close" if commit else ""))
+            finally:
+                self.busy = None
+            if r is None:
+                self.root.after(0, self.info, "앗, 결과를 못 받았어요.\n\n" + "\n".join(lines[-4:])[:400])
+                return
+            why = {"future_month": "아직 오지 않은 달이에요", "month_not_over": "그 달 마지막 평일 전이라 마감하지 않았어요",
+                   "config": "설정이 없어요"}.get(r.get("error"), r.get("error"))
+            dcs = r.get("day_close") or {}
+            dc = {"saved": "다 마감됨", "dry": "상태만 봄 (안 누름)", "not_all": "일부가 안 됨",
+                  "month_not_set": "달을 못 골랐어요"}.get(dcs.get("status"), dcs.get("status", "?"))
+            if dcs.get("status") == "dry" and dcs.get("before") is not None:
+                dc += " — %s" % str(dcs["before"])[:80]
+            rows = (r.get("month_close") or {}).get("rows") or []
+            mc = ", ".join("%s학기 %s" % (x.get("semester", ""), x.get("state", "")) for x in rows) or \
+                {"skipped": "일마감이 안 돼서 안 함", "no_row": "그 달 줄을 못 찾음"}.get((r.get("month_close") or {}).get("status"), "?")
+            msg = ("%s %s\n\n일마감: %s\n월마감: %s" % (ym, "마감 끝" if (commit and r.get("ok")) else ("상태" if not commit else "마감이 다 안 됐어요"), dc, mc)
+                   + ("\n\n⛔ " + why if why else "") + "\n\n나이스 출결마감 화면에서 한 번 확인해 주세요.")
+            self.root.after(0, self.info, msg)
+        threading.Thread(target=fn, daemon=True).start()
+
     # ── 복무 (근무상황 상신) ──
     def bokmu_form(self):
         c = cfg()
@@ -509,6 +713,8 @@ class Widget:
         v_reason = tk.StringVar(value="")
         v_contact = tk.StringVar(value=c.get("contact", ""))
         v_line = tk.StringVar(value=c.get("approval_line", ""))
+        v_end_date = tk.StringVar(value=v_date.get())                    # 41조 연수 종료일
+        v_dest = tk.StringVar(value=c.get("training_destination", ""))   # 41조 연수 목적지
         f = ("Malgun Gothic", 9)
 
         def row(r, label, var, width=12):
@@ -522,36 +728,61 @@ class Widget:
         for i, k in enumerate(BOKMU_TYPES):      # 두 줄 × 셋 — 한 줄로 늘어놓으면 창 밖으로 나간다
             tk.Radiobutton(kinds, text=k, variable=kind, value=k, bg=BG, font=f, activebackground=BG, width=7, anchor="w").grid(row=i // 3, column=i % 3, sticky="w")
         # 날짜 — 치지 않고 단추를 눌러 달력에서 고른다
-        tk.Label(g, text="날짜", bg=BG, fg=INK, font=f).grid(row=1, column=0, sticky="nw", pady=2)
-        df = tk.Frame(g, bg=BG)
-        df.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=2)
-        db = tk.Button(df, text=date_label(v_date.get()), font=f, relief="groove", bg="white", cursor="hand2", anchor="w")
-        db.pack(anchor="w")
-        cal = {"box": None}
+        def date_row(r, label, var):
+            tk.Label(g, text=label, bg=BG, fg=INK, font=f).grid(row=r, column=0, sticky="nw", pady=2)
+            df = tk.Frame(g, bg=BG)
+            df.grid(row=r, column=1, sticky="w", padx=(8, 0), pady=2)
+            db = tk.Button(df, text=date_label(var.get()), font=f, relief="groove", bg="white", cursor="hand2", anchor="w")
+            db.pack(anchor="w")
+            cal = {"box": None}
 
-        def picked(iso):
-            db.config(text=date_label(iso))
-            toggle_cal()
+            def picked(iso):
+                db.config(text=date_label(iso))
+                toggle_cal()
 
-        def toggle_cal():
-            if cal["box"]:
-                cal["box"].destroy(); cal["box"] = None
-            else:
-                cal["box"] = date_picker(df, v_date, BG, picked)
-                cal["box"].pack(anchor="w", pady=(4, 2))
-            self.place_tip(tip)                    # 크기가 바뀌었으니 다시 가운데로
-        db.config(command=toggle_cal)
+            def toggle_cal():
+                if cal["box"]:
+                    cal["box"].destroy(); cal["box"] = None
+                else:
+                    cal["box"] = date_picker(df, var, BG, picked)
+                    cal["box"].pack(anchor="w", pady=(4, 2))
+                self.place_tip(tip)                    # 크기가 바뀌었으니 다시 가운데로
+            db.config(command=toggle_cal)
+            return db
+        date_row(1, "날짜", v_date)
         row(2, "시작", v_start, 7)
         row(3, "종료", v_end, 7)
         e_reason = row(4, "사유", v_reason, 30)
         row(5, "연락처", v_contact, 16)
         row(6, "결재선", v_line, 24)
-        hint = tk.Label(g, text="조퇴 종료 = 설정의 퇴근 시각 %s · 지각 시작 = 출근 시각 %s · 5분 단위\n결재선 = 나이스 «개인결재선»에 이름 붙여 저장해 둔 그 이름 (없으면 나이스에서 먼저 만들어 두세요)" % (end_default, c.get("work_start") or "08:40"),
+        db_end = date_row(7, "종료일", v_end_date)
+        row(8, "목적지", v_dest, 16)
+        hint = tk.Label(g, text="조퇴 종료 = 설정의 퇴근 시각 %s · 지각 시작 = 출근 시각 %s · 5분 단위\n"
+                                "결재선 = 나이스 «개인결재선»에 이름 붙여 저장해 둔 그 이름 (없으면 나이스에서 먼저 만들어 두세요)\n"
+                                "41조연수 = 날짜(시작일)~종료일 종일, 시각은 안 씀 · 목적지 필수 (예: 자택)\n"
+                                "초과근무 = 평일 시간외 근무만 · 사유 칸이 «하여야 할 일» 로 들어감 · 종료일·목적지는 41조에만 씀" % (end_default, c.get("work_start") or "08:40"),
                         bg=BG, fg="#8a7a68", font=("Malgun Gothic", 8), justify="left", wraplength=420)
-        hint.grid(row=7, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        hint.grid(row=9, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         def on_kind(*_):
             k = kind.get()
+            # 결재선 — 초과근무·41조는 조퇴와 다른 결재선을 쓰는 학교가 많다
+            if k == "초과근무":
+                v_line.set(c.get("overtime_approval_line", ""))
+            elif k == "41조연수":
+                v_line.set(c.get("training_approval_line") or c.get("approval_line", ""))
+            else:
+                v_line.set(c.get("approval_line", ""))
+            if k == "41조연수":                    # 종일 — 시각은 건드리지 않는다
+                if not v_reason.get().strip() and c.get("training_reason"):
+                    v_reason.set(c["training_reason"])
+                if v_end_date.get() < v_date.get():
+                    v_end_date.set(v_date.get()); db_end.config(text=date_label(v_date.get()))
+                return
+            if k == "초과근무":                    # 퇴근 시각부터 2시간
+                t = datetime.strptime(end_default, "%H:%M")
+                v_start.set(round5(end_default)); v_end.set(round5((t + timedelta(hours=2)).strftime("%H:%M")))
+                return
             if k in ("조퇴", "병조퇴"):
                 v_start.set(round5(datetime.now().strftime("%H:%M"))); v_end.set(end_default)
             elif k in ("외출", "병외출"):
@@ -563,32 +794,55 @@ class Widget:
         btns = tk.Frame(fr, bg=BG)
         btns.pack(pady=(0, 10))
         tk.Button(btns, text="상신", font=("Malgun Gothic", 9, "bold"), bg="#c2417a", fg="white", relief="flat", padx=12,
-                  command=lambda: self.bokmu_submit(tip, kind.get(), v_date.get().strip(), v_start.get().strip(), v_end.get().strip(), v_reason.get().strip(), v_contact.get().strip(), v_line.get().strip())).pack(side="left", padx=4)
+                  command=lambda: self.bokmu_submit(tip, kind.get(), v_date.get().strip(), v_start.get().strip(), v_end.get().strip(), v_reason.get().strip(), v_contact.get().strip(), v_line.get().strip(),
+                                                    v_end_date.get().strip(), v_dest.get().strip())).pack(side="left", padx=4)
         tk.Button(btns, text="닫기", font=f, relief="flat", padx=10, command=tip.destroy).pack(side="left", padx=4)
 
-    def bokmu_submit(self, tip, kind, d, start, end, reason, contact, line):
-        for hm in (start, end):
-            if not re.fullmatch(r"\d{1,2}:\d{2}", hm):
-                self.say("시각은 15:30 처럼 적어 주세요", "#c0392b", 5000); return
+    def bokmu_submit(self, tip, kind, d, start, end, reason, contact, line, end_date="", dest=""):
+        training, overtime = kind == "41조연수", kind == "초과근무"
+        if not training:                           # 41조는 종일 — 시각을 안 본다
+            for hm in (start, end):
+                if not re.fullmatch(r"\d{1,2}:\d{2}", hm):
+                    self.say("시각은 15:30 처럼 적어 주세요", "#c0392b", 5000); return
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
             self.say("날짜는 2026-10-16 처럼 적어 주세요", "#c0392b", 5000); return
+        if training:
+            end_date = end_date or d
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end_date) or end_date < d:
+                self.say("종료일이 시작 날짜보다 앞이에요", "#c0392b", 5000); return
+            if not dest:
+                self.say("41조 연수는 목적지를 적어 주세요 (예: 자택)", "#c0392b", 6000); return
         if not reason:
-            self.say("사유를 적어 주세요", "#c0392b", 5000); return
-        if not re.fullmatch(r"[\d-]{9,14}", contact):
+            self.say("하여야 할 일을 사유 칸에 적어 주세요" if overtime else "사유를 적어 주세요", "#c0392b", 5000); return
+        if not overtime and not re.fullmatch(r"[\d-]{9,14}", contact):
             self.say("연락처를 010-1234-5678 처럼 적어 주세요 (나이스가 요구해요)", "#c0392b", 6000); return
         if not line:
             self.say("결재선 이름을 적어 주세요 (나이스 개인결재선에 저장한 이름)", "#c0392b", 7000); return
         tip.destroy()
         self.busy = "복무 상신 중"
         c = cfg()
-        if c.get("contact") != contact or c.get("approval_line") != line:      # 다음부터 기본값으로
+        line_key = "overtime_approval_line" if overtime else ("training_approval_line" if training else "approval_line")
+        new = {line_key: line}                     # 다음부터 기본값으로
+        if not overtime:
+            new["contact"] = contact
+        if training:
+            new["training_destination"], new["training_reason"] = dest, reason
+        if any(c.get(k) != v for k, v in new.items()):
             try:
-                c["contact"], c["approval_line"] = contact, line
+                c.update(new)
                 CONFIG.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
-        args = [str(PY), "-X", "utf8", str(BOKMU), "--type", kind, "--date", d, "--start", round5(start), "--end", round5(end),
-                "--reason", reason, "--contact", contact, "--approval-line", line]
+        if overtime:
+            args = [str(PY), "-X", "utf8", str(OVERTIME), "--date", d, "--start", round5(start), "--end", round5(end),
+                    "--task", reason, "--approval-line", line]
+        elif training:
+            args = [str(PY), "-X", "utf8", str(BOKMU), "--type", kind, "--date", d, "--end-date", end_date,
+                    "--destination", dest, "--reason", reason, "--contact", contact, "--approval-line", line]
+        else:
+            args = [str(PY), "-X", "utf8", str(BOKMU), "--type", kind, "--date", d, "--start", round5(start), "--end", round5(end),
+                    "--reason", reason, "--contact", contact, "--approval-line", line]
+        when = "%s~%s" % (d, end_date) if training else "%s %s~%s" % (d, start, end)
 
         def fn():
             t0 = time.time()
@@ -598,13 +852,14 @@ class Widget:
                                        env=ENV, cwd=str(BOKMU.parent), creationflags=NO_WINDOW, timeout=900)
                 lines = [ln for ln in ((p.stdout or "") + "\n" + (p.stderr or "")).splitlines() if ln.strip()]
                 ok = p.returncode == 0 and any("상신 완료" in ln for ln in lines)
-                log("bokmu %s %s %s~%s" % (kind, d, start, end), ["READY" if ok else "FAIL " + " / ".join(lines[-3:])[:200]], t0)
+                log("bokmu %s %s" % (kind, when), ["READY" if ok else "FAIL " + " / ".join(lines[-3:])[:200]], t0)
             except Exception as e:
                 ok, lines = False, [str(e)]
             finally:
                 self.busy = None
             if ok:
-                self.root.after(0, self.info, "상신 완료 — %s %s %s~%s\n사유: %s\n\n나이스 개인근무상황관리에서 한 번 확인하세요." % (kind, d, start, end, reason))
+                where = "개인초과근무관리" if overtime else "개인근무상황관리"
+                self.root.after(0, self.info, "상신 완료 — %s %s\n사유: %s\n\n나이스 %s에서 한 번 확인하세요." % (kind, when, reason, where))
             else:
                 self.root.after(0, self.info, "앗, 상신이 안 됐어요.\n\n" + "\n".join(lines[-4:])[:500] + "\n\n(크롬 창이 남아 있으면 거기서 직접 마무리할 수 있어요)")
         threading.Thread(target=fn, daemon=True).start()

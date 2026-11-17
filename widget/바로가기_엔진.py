@@ -4,6 +4,7 @@
   python 바로가기_엔진.py neis open                 나이스 첫 화면 (로그인돼 있으면 1~2초, 아니면 로그인부터)
   python 바로가기_엔진.py neis warm [--launch]      미리 데워 두기 — 창은 꺼내지 않는다
   python 바로가기_엔진.py edufine main              K-에듀파인 첫 화면
+  python 바로가기_엔진.py edufine punui             학교회계 → 품의등록 빈 화면에 제목·개요 틀 채우기 (저장 안 함)
   python 바로가기_엔진.py edufine open              문서등록대장
   python 바로가기_엔진.py edufine cnrs              공람대기
   python 바로가기_엔진.py edufine warm [--launch]   미리 데워 두기
@@ -437,10 +438,142 @@ def edufine_session_ok(page, urls):
         return False
 
 
+# ── 학교회계 품의등록 (2026-11-16 실측: sen klef) ──────────────────────────
+# 로고 아래 업무 선택칸(cboJobList) «업무관리» → «학교회계» → 왼쪽 메뉴 사업담당 > 품의/정산 > 품의등록.
+# 품의등록을 누르면 빈 신규 화면이 바로 뜬다 (회계연도 콤보에 올해 회계연도가 들어 있다).
+# ★ 제목·개요만 채우고 멈춘다. [저장]·[결재요청] 은 어떤 경우에도 누르지 않는다 — 선생님이 내용을 고친 뒤 직접.
+# 제목·개요 틀은 설정의 punui_title / punui_body. {년도} → 회계연도, {기안자} → 설정의 punui_requester (예: «교사 홍길동»).
+# 이름은 선생님마다 다르므로 코드에 두지 않는다 — 위젯을 만들 때 물어서 설정에 넣는다.
+JOB_COMBO = "mainframe.MainVFrameSet.TopFrame.form.cboJobList"
+LNB_GRID = "mainframe.MainVFrameSet.SubHFrameSet.LeftFrame.form.divLnb.form.gridMenu.body"
+PUNUI_TITLE = "{년도} 물품을 구입하고자 합니다."
+PUNUI_BODY = ("{년도}학년도  물품을 구매하고자 합니다.\n"
+              "  1. 내용: \n  2. 내역: \n  3. 금액: 금원(금원)\n  4. 구매처(예정): \n  5. 품의요청자: {기안자}.  끝.")
+JS_CENTER = """(i) => { const e = document.getElementById(i); if (!e) return null; const b = e.getBoundingClientRect();
+  return b.width ? [b.x + b.width / 2, b.y + b.height / 2] : null; }"""
+JS_LNB_ROWS = r"""(g) => [...document.querySelectorAll('div[id^="' + g + '.gridrow_"]')].filter(e => /gridrow_\d+$/.test(e.id))
+  .map(e => { const b = e.getBoundingClientRect(); return [(e.innerText || '').trim(), b.x + b.width / 2, b.y + b.height / 2]; })"""
+
+
+def nexa_click(page, x, y):
+    """Nexacro 는 down/up 이 붙어 있으면 못 알아듣는다 — 사이를 벌린다 (edufine_punui 와 같다)."""
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.wait_for_timeout(120)
+    page.mouse.up()
+
+
+def pick_school_account(page):
+    """업무 선택칸을 «학교회계» 로. 이미 학교회계면 그대로 둔다."""
+    import edufine_common as E
+    for _ in range(40):                   # 로그인 직후엔 첫 화면이 다 그려지기까지 10~20초 (11/16 실측)
+        if page.evaluate(JS_CENTER, JOB_COMBO + ".dropbutton"):
+            break
+        E.close_modals(page)
+        page.wait_for_timeout(750)
+    now = page.evaluate("() => { try { return nexacro.getApplication().mainframe.MainVFrameSet.TopFrame.form.cboJobList.text; } catch (e) { return null; } }")
+    if now == "학교회계":
+        return
+    for _ in range(5):
+        # 공지 팝업(«브라우저 최신 업데이트 사용 권고» 등)이 로그인 몇 초 뒤에 떠서 선택칸을 가린다 (11/18 실측) — 누르기 직전에 치운다
+        for _ in range(6):
+            E.close_modals(page)
+            if page.locator(E.OVERLAY).count() == 0:
+                break
+            page.wait_for_timeout(700)
+        pt = page.evaluate(JS_CENTER, JOB_COMBO + ".dropbutton")
+        if not pt:
+            raise RuntimeError("업무 선택칸(로고 아래)을 못 찾았어요")
+        nexa_click(page, *pt)
+        hit = None
+        for _ in range(8):                # 목록이 화면 안(x>0)에 그려질 때까지
+            page.wait_for_timeout(400)
+            items = page.evaluate(r"""(p) => [...document.querySelectorAll('div[id^="' + p + '.combolist.item_"]')]
+                .filter(e => /item_\d+$/.test(e.id)).map(e => { const b = e.getBoundingClientRect();
+                  return [(e.innerText || '').trim(), b.x + b.width / 2, b.y + b.height / 2]; })""", JOB_COMBO)
+            hit = next((it for it in items if it[0] == "학교회계" and it[1] > 0), None)
+            if hit:
+                break
+        if hit:
+            nexa_click(page, hit[1], hit[2])
+            page.wait_for_timeout(3000)
+            now = page.evaluate("() => { try { return nexacro.getApplication().mainframe.MainVFrameSet.TopFrame.form.cboJobList.text; } catch (e) { return null; } }")
+            if now == "학교회계":
+                return
+        page.wait_for_timeout(800)
+    raise RuntimeError("업무 선택칸에서 «학교회계» 를 못 골랐어요 (가린 창: %s)" % (E.modal_text(page) or "없음")[:80])
+
+
+def open_lnb(page, path):
+    """왼쪽 메뉴 나무에서 path 순서대로 누른다. 이미 펼쳐져 아래 항목이 보이면 그 단계는 건너뛴다 (누르면 접힌다)."""
+    for i, name in enumerate(path):
+        rows = {}
+        for _ in range(10):
+            rows = {t: (x, y) for t, x, y in page.evaluate(JS_LNB_ROWS, LNB_GRID) if x > 0}
+            if name in rows:
+                break
+            page.wait_for_timeout(800)
+        if name not in rows:
+            raise RuntimeError("왼쪽 메뉴에 «%s» 이(가) 없어요" % name)
+        if i + 1 < len(path) and path[i + 1] in rows:
+            continue                      # 이미 펼쳐져 있다
+        nexa_click(page, *rows[name])
+        page.wait_for_timeout(1200)
+
+
+def type_field(page, suffix, text):
+    """값만 넣으면 nexacro 가 모른다 — 눌러서 실제로 친다 (edufine_punui.type_into 와 같다)."""
+    el = page.locator('input[id$="%s"]:visible, textarea[id$="%s"]:visible' % (suffix, suffix)).first
+    el.click()
+    page.wait_for_timeout(300)
+    el.press("Control+a")
+    el.type(text, delay=10)
+    page.wait_for_timeout(300)
+    return el.input_value()
+
+
+def punui_new(E, page, urls):
+    """학교회계 → 품의등록 빈 화면 → 제목·개요 틀 채우기. 저장은 안 한다."""
+    if "keris_ui/main.do" not in page.url:
+        step("에듀파인 첫 화면으로")
+        goto(page, urls["main"], wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+    E.close_modals(page)
+    step("학교회계로 바꾸는 중")
+    pick_school_account(page)
+    E.close_modals(page)
+    step("품의등록 여는 중")
+    open_lnb(page, ["사업담당", "품의/정산", "품의등록"])
+    title_sel = 'input[id$="form.edtCnsulSj:input"]:visible'
+    page.wait_for_selector(title_sel, timeout=30_000)
+    page.wait_for_timeout(1500)
+    E.close_modals(page)
+    # 이미 열려 있던 품의등록 탭에 쓰던 글이 있으면 덮어쓰지 않는다 (탭이 열려 있으면 메뉴를 눌러도 그 탭으로 간다)
+    if page.locator(title_sel).first.input_value().strip():
+        step("쓰던 품의등록 화면이 있어 그대로 보여 줌")
+        return
+    year = page.evaluate(r"""() => { const e = [...document.querySelectorAll('input[id*="divMain.form"]')]
+        .find(x => x.offsetParent && /^\d{4}$/.test((x.value || '').trim())); return e ? e.value.trim() : null; }""")
+    if not year:                          # 회계연도는 3월 시작
+        from datetime import date
+        t = date.today()
+        year = str(t.year if t.month >= 3 else t.year - 1)
+    cfg = {**teacher_config.DEFAULTS, **json.loads(teacher_config.CONFIG_FILE.read_text(encoding="utf-8"))}
+    who = (cfg.get("punui_requester") or "").strip()
+    title = (cfg.get("punui_title") or PUNUI_TITLE).replace("{년도}", year).replace("{기안자}", who)
+    body = (cfg.get("punui_body") or PUNUI_BODY).replace("{년도}", year).replace("{기안자}", who)
+    step("제목·개요 채우는 중")
+    if (type_field(page, "form.edtCnsulSj:input", title) or "").strip() != title.strip():
+        raise RuntimeError("제목 칸에 글자가 안 들어갔어요")
+    type_field(page, "form.txtareaCnsulSumrCn:textarea", body)
+
+
 def edufine_cmd(cmd, launch_ok):
     from playwright.sync_api import sync_playwright
     site = "edufine"
     E, urls = edufine_urls()
+    if cmd == "punui":
+        urls = {**urls, "punui": urls["main"]}
     if cmd == "warm" and not alive(SITES[site]["port"]) and not launch_ok:
         print("READY", flush=True)
         return
@@ -466,6 +599,14 @@ def edufine_cmd(cmd, launch_ok):
             print("READY", flush=True)
             return
         page.on("dialog", E.on_dialog)      # «다른 IP 에서 접속 중» 창만 [확인], 나머지는 «아니오» — 키트 규칙
+        if cmd == "punui":
+            if not ("klef." in page.url and edufine_session_ok(page, urls)):
+                edufine_login(E, ctx, page, urls)
+            to_front_sync(page)
+            punui_new(E, page, urls)
+            to_front_sync(page)
+            print("READY", flush=True)
+            return
         target = urls[cmd]
         key = target.split("?")[0].rsplit("/", 1)[-1]
         if key in page.url:

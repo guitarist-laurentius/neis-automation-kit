@@ -87,7 +87,8 @@ def status() -> int:
     print(f"나이스 인증서 프로그램  {'설치됨' if program_installed() else '❌ 없음 → python neis_cert.py install'}"
           f"{' (실행 중)' if agent_listening() else ''}")
     dirs = cert_files()
-    print(f"인증서 파일 위치        {', '.join(dirs) if dirs else '❌ 못 찾음 (C:\\GPKI · LocalLow\\GPKI·NPKI 를 봤다)'}")
+    not_found = "❌ 못 찾음 (C:\\GPKI · LocalLow\\GPKI·NPKI 를 봤다)"   # 3.10: f-string {} 안에 역슬래시 불가
+    print(f"인증서 파일 위치        {', '.join(dirs) if dirs else not_found}")
     return 0 if program_installed() and dirs else 1
 
 

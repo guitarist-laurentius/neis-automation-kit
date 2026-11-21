@@ -3,8 +3,8 @@
 
   .\\.venv\\Scripts\\pythonw.exe widget\\바로가기위젯.pyw      (설정하면 바탕화면 바로가기가 생긴다)
 
-  [나이스] [출결] [출결마감] [에듀파인] [학교회계] [문서등록대장] [공람] [검수] [복무]  — 나이스·에듀파인·학교회계·문서등록대장·공람은 누르면 인증서 자동 로그인까지 해서 그 화면을 맨 앞에 띄운다.
-  [학교회계]: 업무를 «학교회계» 로 바꿔 품의/정산 > 품의등록 빈 화면을 열고 제목·개요 틀(설정 punui_title·punui_body)만 채운다. 저장은 안 한다.
+  [나이스] [출결] [출결마감] [에듀파인] [물품구입] [문서등록대장] [공람] [검수] [복무]  — 나이스·에듀파인·물품구입·문서등록대장·공람은 누르면 인증서 자동 로그인까지 해서 그 화면을 맨 앞에 띄운다.
+  [물품구입]: 업무를 «학교회계» 로 바꿔 품의/정산 > 품의등록 빈 화면을 열고 제목·개요 틀(설정 punui_title·punui_body)만 채운다. 저장은 안 한다.
   [검수]: 밀린 검사검수 건을 조회해 목록을 보여 주고, [등록하기]를 눌러야 등록한다 (edufine_inspect.py --go).
   [복무]: 작은 창에서 종류(조퇴·외출·지각·병조퇴·병외출·병지각)·날짜·시각·사유를 고르고 [상신]을 누르면 나이스에 승인요청까지 올린다
           (main_bokmu.py). 종료 시각 기본값은 설정의 «퇴근 시각»(학교마다 다르다 — 처음 설정에서 묻는다).
@@ -47,7 +47,7 @@ BG, INK, LINE = "#fffaf2", "#3b2f25", "#d9ccb8"
 BTNS = [("나이스", "neis", "open", "#1b6fb5"),
         ("출결", "attend", "form", "#2a6fdb"), ("출결마감", "monthclose", "form", "#7a5a1f"),   # 나이스 일 — 나이스 바로 옆 (11/18 선생님 요청)
         ("에듀파인", "edufine", "main", "#2f7d4f"),
-        ("학교회계", "edufine", "punui", "#1f7a7a"),      # 학교회계 → 품의등록 빈 화면 + 제목·개요 틀 (저장 안 함)
+        ("물품구입", "edufine", "punui", "#1f7a7a"),      # 학교회계 → 품의등록 빈 화면 + 제목·개요 틀 (저장 안 함)
         ("문서등록대장", "edufine", "open", "#8a5a2b"), ("공람", "edufine", "cnrs", "#6b4fb5"),
         ("검수", "inspect", "check", "#d63a30"), ("복무", "bokmu", "form", "#c2417a")]
 ATTEND = HERE.parent / "attendance_quick.py"       # 키트의 «한 줄 문장 → 일일출결관리» (풀이 / 넣기 / 명단)
@@ -390,6 +390,11 @@ class Widget:
         if self.busy:
             dots = "." * (int(time.time() * 2) % 3 + 1)
             self.show_status(self.busy + dots, "#8a7a68")
+            self._shown_busy = self.busy
+        elif getattr(self, "_shown_busy", None):     # 일이 끝났는데 «…읽는 중...» 이 남아 있으면 지운다 (11/18)
+            if self.status.cget("text").startswith(self._shown_busy):
+                self.show_status("", INK)
+            self._shown_busy = None
         k = ctypes.windll.kernel32
         if self.ev_show and k.WaitForSingleObject(wt.HANDLE(self.ev_show), 0) == 0:
             self.come_back()

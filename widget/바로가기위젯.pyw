@@ -45,13 +45,15 @@ RELAUNCH_EVERY = 60 * 1000      # 크롬을 닫았으면 1분 안에 다시 최�
 PORTS = {"neis": 9322, "edufine": 9324}
 
 BG, INK, LINE = "#fffaf2", "#3b2f25", "#d9ccb8"
-BTNS = [("나이스", "neis", "open", "#1b6fb5"),
-        ("출결", "attend", "form", "#2a6fdb"), ("출결마감", "monthclose", "form", "#7a5a1f"),   # 나이스 일 — 나이스 바로 옆 (11/18 선생님 요청)
-        ("에듀파인", "edufine", "main", "#2f7d4f"),
-        ("물품구입", "edufine", "punui", "#1f7a7a"),      # 학교회계 → 품의등록 빈 화면 + 제목·개요 틀 (저장 안 함)
-        ("문서등록대장", "edufine", "open", "#8a5a2b"), ("공람", "edufine", "cnrs", "#6b4fb5"),
-        ("리로스쿨", "riro", "open", "#e0742a"),          # 11/23: 검수 자리에 — 리로스쿨 아이디·비밀번호 자동 로그인
-        ("복무", "bokmu", "form", "#c2417a")]
+# 도넛 칸 색 — 고풍스러운 파스텔 (11/23 선생님 요청: 원색이 촌스럽다). 글자는 먹색 RING_INK
+BTNS = [("나이스", "neis", "open", "#a9bfd4"),                                   # 연한 쪽빛
+        ("출결", "attend", "form", "#b3cdbf"), ("출결마감", "monthclose", "form", "#e0cfa9"),   # 옥색 · 미색 — 나이스 바로 옆 (11/18)
+        ("에듀파인", "edufine", "main", "#c3d1a8"),                              # 쑥색
+        ("물품구입", "edufine", "punui", "#a9cbc8"),                             # 청자색 — 학교회계 → 품의등록 빈 화면 + 제목·개요 틀 (저장 안 함)
+        ("문서등록대장", "edufine", "open", "#d6bfa8"), ("공람", "edufine", "cnrs", "#c7b9d6"),   # 연한 흙빛 · 연보라
+        ("리로스쿨", "riro", "open", "#ebc2a8"),                                # 살구색 — 11/23: 검수 자리에, 리로스쿨 자동 로그인
+        ("복무", "bokmu", "form", "#e2b4bd")]                                    # 진달래색
+RING_INK, RING_GAP, RING_HOVER = "#3d3028", "#fbf6ec", "#b08d4f"                 # 글자 먹색 · 칸 사이 한지색 · 올렸을 때 금빛 테
 # 휠 런처 크기 (11/23): 얼굴 창 FACE, 펼친 휠 창 WHEEL, 도넛 안·바깥 반지름 R_IN·R_OUT, 얼굴 배율 SCALE
 # 처음엔 동그라미 단추였는데 너무 넓어서 반 크기 + 도넛 9칸으로 바꿨다 (11/23 선생님 요청)
 KEY = "#ff00fe"                 # 이 색은 투명 + 클릭 통과 (그림에 쓰지 않는다)
@@ -60,6 +62,30 @@ FACE = 48
 R_IN, R_OUT = 31, 84
 WHEEL = 2 * R_OUT + 8
 GAP_DEG = 1.6                   # 칸 사이 틈 (도)
+FACES = ["궁예", "곰돌이", "고양이", "병아리", "스마일", "안경 선생님"]   # 고를 수 있는 얼굴 (+ «내 그림»)
+FACE_FILE = BASE / "widget_face.png"         # «내 그림 파일…» 로 고른 그림을 동그랗게 잘라 둔 것
+
+
+def make_face_png(src, dst, size=44):
+    """사진·그림을 가운데 정사각형으로 잘라 동그랗게 만든다. 동그라미 밖은 KEY 색(= 투명)."""
+    from PIL import Image, ImageDraw, ImageOps
+    im = ImageOps.exif_transpose(Image.open(src)).convert("RGBA")
+    side = min(im.size)
+    im = im.crop(((im.width - side) // 2, (im.height - side) // 2, (im.width + side) // 2, (im.height + side) // 2))
+    im = im.resize((size, size), Image.LANCZOS)
+    white = Image.new("RGBA", im.size, (255, 255, 255, 255))
+    body = Image.alpha_composite(white, im).convert("RGB")
+    mask = Image.new("L", im.size, 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    alpha = im.split()[3].point(lambda a: 255 if a >= 128 else 0)
+    mask = Image.composite(mask, Image.new("L", im.size, 0), alpha)
+    out = Image.new("RGB", im.size, tuple(int(KEY[i:i + 2], 16) for i in (1, 3, 5)))
+    out.paste(body, (0, 0), mask)
+    ImageDraw.Draw(out).ellipse((0, 0, size - 1, size - 1), outline=(181, 154, 118), width=2)
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    out.save(dst)
+
+
 WHEEL_LABEL = {"리로스쿨": "리로\n스쿨", "출결마감": "출결\n마감", "에듀파인": "에듀\n파인", "물품구입": "물품\n구입", "문서등록대장": "문서\n등록대장"}
 ATTEND = HERE.parent / "attendance_quick.py"       # 키트의 «한 줄 문장 → 일일출결관리» (풀이 / 넣기 / 명단)
 MONTH_CLOSE = HERE.parent / "month_close.py"       # 키트의 월 출결마감 (일마감 + 월마감 한 번에)
@@ -309,6 +335,13 @@ class Widget:
         self.cv = tk.Canvas(self.root, width=FACE, height=FACE, bg=KEY, highlightthickness=0, bd=0)
         self.cv.pack()
         self.expanded = False
+        self.face_kind = st.get("face") or "스마일"     # 처음 켠 선생님은 고르기 창이 뜬다 (mainloop)
+        self.face_img = None
+        if self.face_kind == "내 그림":
+            try:
+                self.face_img = tk.PhotoImage(file=str(FACE_FILE))
+            except Exception:
+                self.face_kind = "스마일"
         self.home = fit_on_screen(int(st.get("x", sw - FACE - 40)), int(st.get("y", 12)), FACE, FACE)   # 얼굴 창 왼쪽 위
         self.root.geometry("%dx%d+%d+%d" % (FACE, FACE, *self.home))
         self.draw_face(FACE // 2, FACE // 2)
@@ -336,14 +369,16 @@ class Widget:
         self.m.add_command(label="지금 미리 열어두기", command=lambda: self.warm_all(True))
         self.m.add_command(label="반 명단 다시 읽기 (출결용)", command=self.attend_roster)
         self.m.add_command(label="리로스쿨 설정 (주소·아이디·비밀번호)", command=self.open_riro_setup)
+        self.m.add_command(label="얼굴 바꾸기", command=self.choose_face)
         self.m.add_command(label="물품 검수 (예전 [검수] 단추)", command=self.inspect_check)
         self.m.add_separator()
         self.m.add_command(label="위젯용 크롬 창 닫기", command=self.close_chrome)
         self.m.add_command(label="위젯 끄기", command=self.root.destroy)
 
-    # ── 궁예 얼굴 (그림 파일 없이 캔버스로 그린다: 대머리 · 왼쪽 눈 안대 · 볼터치) ──
-    def draw_face(self, x, y, s=SCALE):
+    # ── 위젯 얼굴 (그림 파일 없이 캔버스로 그린다). 선생님마다 고른다 — 오른쪽 클릭 → «얼굴 바꾸기» (11/23) ──
+    def draw_face(self, x, y, s=SCALE, kind=None):
         """원래 크기(반지름 34) 기준 좌표에 배율 s 를 곱해 그린다. 선 굵기도 같이 줄인다."""
+        kind = kind or getattr(self, "face_kind", "스마일")
         c, t = self.cv, "face"
 
         def P(*xy):
@@ -351,22 +386,144 @@ class Widget:
 
         def W(w):
             return max(1, round(w * s))
-        r = 34
-        c.create_oval(*P(-30, 22, 30, 62), fill="#8b6f4e", outline="#6e573c", width=W(2), tags=t)       # 승복 어깨
-        c.create_polygon(*P(-9, 26, 0, 40, 9, 26), fill="#f3e6cf", outline="", tags=t)                  # 옷깃
-        for sx in (-1, 1):                                                                              # 귀
-            c.create_oval(*P(sx * (r - 3) - 7, -6, sx * (r - 3) + 7, 10), fill="#f4cfae", outline="#d9a982", width=W(2), tags=t)
-        c.create_oval(*P(-r, -r - 4, r, r - 4), fill="#f7dcc2", outline="#d9a982", width=W(2), tags=t)  # 머리
-        c.create_oval(*P(-20, -30, -6, -22), fill="#fff4e8", outline="", tags=t)                        # 대머리 반짝
-        c.create_line(*P(-13, -4, 20, -34), fill="#2b2b2b", width=W(3), tags=t)                          # 안대 끈
-        c.create_line(*P(-13, -4, -r + 1, -2), fill="#2b2b2b", width=W(3), tags=t)
-        c.create_oval(*P(-22, -12, -4, 4), fill="#2b2b2b", outline="#111111", tags=t)                   # 안대
-        c.create_line(*P(4, -16, 20, -12), fill="#4a3b30", width=W(4), capstyle="round", tags=t)         # 눈썹 (근엄)
-        c.create_oval(*P(7, -9, 17, 3), fill="#2b2b2b", outline="", tags=t)                             # 눈
-        c.create_oval(*P(9, -7, 13, -3), fill="white", outline="", tags=t)
-        for bx in (-18, 18):                                                                            # 볼터치
-            c.create_oval(*P(bx - 7, 7, bx + 7, 13), fill="#f7a8a8", outline="", tags=t)
-        c.create_arc(*P(-8, 4, 8, 18), start=200, extent=140, style="arc", outline="#8a4b3a", width=W(2), tags=t)  # 입
+
+        def oval(*xy, **kw):
+            kw.setdefault("outline", "")
+            if "width" in kw:
+                kw["width"] = W(kw["width"])
+            c.create_oval(*P(*xy), tags=t, **kw)
+
+        def eyes(dx=12, y0=-4, r=4):
+            for ex in (-dx, dx):
+                oval(ex - r, y0 - r - 1, ex + r, y0 + r + 1, fill="#2b2b2b")
+                oval(ex - r + 1, y0 - r, ex, y0 - 1, fill="white")
+
+        def smile(y0=6, w=8, col="#8a4b3a"):
+            c.create_arc(*P(-w, y0 - 2, w, y0 + 12), start=200, extent=140, style="arc", outline=col, width=W(2), tags=t)
+
+        def blush(dx=18, y0=9):
+            for bx in (-dx, dx):
+                oval(bx - 7, y0 - 3, bx + 7, y0 + 3, fill="#f7a8a8")
+
+        if kind == "내 그림" and getattr(self, "face_img", None):
+            c.create_image(x, y, image=self.face_img, tags=t)
+            return
+        if kind == "궁예":
+            r = 34
+            oval(-30, 22, 30, 62, fill="#8b6f4e", outline="#6e573c", width=2)                      # 승복 어깨
+            c.create_polygon(*P(-9, 26, 0, 40, 9, 26), fill="#f3e6cf", outline="", tags=t)        # 옷깃
+            for sx in (-1, 1):                                                                    # 귀
+                oval(sx * (r - 3) - 7, -6, sx * (r - 3) + 7, 10, fill="#f4cfae", outline="#d9a982", width=2)
+            oval(-r, -r - 4, r, r - 4, fill="#f7dcc2", outline="#d9a982", width=2)                # 머리
+            oval(-20, -30, -6, -22, fill="#fff4e8")                                               # 대머리 반짝
+            c.create_line(*P(-13, -4, 20, -34), fill="#2b2b2b", width=W(3), tags=t)                # 안대 끈
+            c.create_line(*P(-13, -4, -r + 1, -2), fill="#2b2b2b", width=W(3), tags=t)
+            oval(-22, -12, -4, 4, fill="#2b2b2b", outline="#111111")                              # 안대
+            c.create_line(*P(4, -16, 20, -12), fill="#4a3b30", width=W(4), capstyle="round", tags=t)  # 눈썹
+            oval(7, -9, 17, 3, fill="#2b2b2b")                                                    # 눈
+            oval(9, -7, 13, -3, fill="white")
+            blush(18, 10)
+            smile(6)
+        elif kind == "곰돌이":
+            for ex in (-24, 24):                                                                  # 귀
+                oval(ex - 12, -36, ex + 12, -12, fill="#a8774f", outline="#7d5534", width=2)
+                oval(ex - 6, -30, ex + 6, -18, fill="#e9c39d")
+            oval(-34, -30, 34, 34, fill="#b88459", outline="#7d5534", width=2)                    # 머리
+            oval(-15, 2, 15, 24, fill="#f0d5b5")                                                  # 주둥이
+            oval(-5, 4, 5, 11, fill="#3b2a20")                                                    # 코
+            eyes(13, -6)
+            blush(22, 10)
+            smile(10, 6, "#3b2a20")
+        elif kind == "고양이":
+            for sx in (-1, 1):                                                                    # 세모 귀
+                c.create_polygon(*P(sx * 30, -10, sx * 26, -40, sx * 8, -26), fill="#f0a35e", outline="#c9783a",
+                                 width=W(2), tags=t)
+                c.create_polygon(*P(sx * 25, -16, sx * 23, -32, sx * 13, -24), fill="#f7c6c6", outline="", tags=t)
+            oval(-34, -30, 34, 32, fill="#f4b16f", outline="#c9783a", width=2)                    # 머리
+            for sx in (-1, 1):                                                                    # 줄무늬
+                c.create_line(*P(sx * 6, -29, sx * 4, -20), fill="#c9783a", width=W(3), tags=t)
+            eyes(13, -4)
+            c.create_polygon(*P(-4, 4, 4, 4, 0, 9), fill="#e86f8a", outline="", tags=t)            # 코
+            for sx in (-1, 1):                                                                    # 수염
+                for dy in (-2, 5):
+                    c.create_line(*P(sx * 14, 8 + dy / 2, sx * 36, 4 + dy), fill="#7a4a2a", width=W(1), tags=t)
+            c.create_arc(*P(-7, 4, 0, 14), start=200, extent=140, style="arc", outline="#7a4a2a", width=W(2), tags=t)
+            c.create_arc(*P(0, 4, 7, 14), start=200, extent=140, style="arc", outline="#7a4a2a", width=W(2), tags=t)
+        elif kind == "병아리":
+            for k, dx in enumerate((-6, 0, 6)):                                                   # 머리 깃털
+                c.create_line(*P(dx, -32, dx * 1.6, -42 - (3 if k == 1 else 0)), fill="#e0a800", width=W(3), tags=t)
+            oval(-34, -32, 34, 34, fill="#ffd93b", outline="#e0a800", width=2)                    # 몸
+            eyes(13, -6)
+            c.create_polygon(*P(-8, 2, 8, 2, 0, 12), fill="#ff8c1a", outline="#d96b00", width=W(1), tags=t)  # 부리
+            blush(22, 8)
+        elif kind == "안경 선생님":
+            oval(-31, -34, 31, 30, fill="#f7dcc2", outline="#d9a982", width=2)                    # 얼굴
+            c.create_arc(*P(-33, -38, 33, 20), start=0, extent=180, style="pieslice", fill="#3b2f25",
+                         outline="#3b2f25", tags=t)                                                # 머리카락
+            c.create_polygon(*P(-30, -10, -26, -22, 4, -22, -6, -14), fill="#3b2f25", outline="", tags=t)  # 앞머리
+            for ex in (-12, 12):                                                                  # 동그란 안경
+                oval(ex - 9, -11, ex + 9, 7, outline="#5a4636", width=2)
+                oval(ex - 3, -5, ex + 3, 1, fill="#2b2b2b")
+            c.create_line(*P(-3, -3, 3, -3), fill="#5a4636", width=W(2), tags=t)
+            blush(20, 12)
+            smile(9)
+        else:                                                                                     # 스마일 (기본)
+            oval(-34, -34, 34, 34, fill="#ffd23f", outline="#e0a800", width=2)
+            for ex in (-12, 12):
+                oval(ex - 4, -14, ex + 4, -2, fill="#3b2f25")
+            blush(20, 6)
+            c.create_arc(*P(-18, -14, 18, 20), start=200, extent=140, style="arc", outline="#3b2f25", width=W(3), tags=t)
+
+    def choose_face(self, first=False):
+        """얼굴 고르기 창 — 누르면 바로 바뀐다. «내 그림 파일…» 은 사진·그림을 동그랗게 잘라 쓴다."""
+        tip, fr = self.popup(("위젯 얼굴을 골라 주세요 — 나중에 오른쪽 클릭 → «얼굴 바꾸기» 로 바꿀 수 있어요"
+                              if first else "위젯 얼굴 바꾸기 — 마음에 드는 얼굴을 누르세요"))
+        row = tk.Frame(fr, bg=BG)
+        row.pack(padx=10, pady=(0, 6))
+        keep = self.cv
+        for kind in FACES:
+            cell = tk.Frame(row, bg=BG)
+            cell.pack(side="left", padx=4)
+            pv = tk.Canvas(cell, width=60, height=60, bg="white" if kind == self.face_kind else BG,
+                           highlightthickness=1, highlightbackground=LINE, cursor="hand2")
+            pv.pack()
+            self.cv = pv
+            self.draw_face(30, 32, s=0.7, kind=kind)
+            tk.Label(cell, text=kind, bg=BG, fg=INK, font=("Malgun Gothic", 8)).pack()
+            pv.bind("<Button-1>", lambda e, k=kind: (tip.destroy(), self.set_face(k)))
+        self.cv = keep
+        btns = tk.Frame(fr, bg=BG)
+        btns.pack(pady=(0, 10))
+        tk.Button(btns, text="내 그림 파일…", font=("Malgun Gothic", 9), relief="flat", padx=10,
+                  command=lambda: (tip.destroy(), self.pick_face_file())).pack(side="left", padx=4)
+        tk.Button(btns, text="닫기", font=("Malgun Gothic", 9), relief="flat", padx=10,
+                  command=lambda: (tip.destroy(), first and self.set_face(self.face_kind))).pack(side="left", padx=4)
+
+    def set_face(self, kind):
+        self.face_kind = kind
+        save_state(face=kind)
+        self.redraw_face()
+
+    def redraw_face(self):
+        self.cv.delete("face")
+        mid = (WHEEL if self.expanded else FACE) // 2
+        self.draw_face(mid, mid)
+        self.cv.tag_raise("face")
+
+    def pick_face_file(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(parent=self.root, title="위젯 얼굴로 쓸 그림 고르기",
+                                          filetypes=[("그림 파일", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"), ("모든 파일", "*.*")])
+        if not path:
+            return
+        try:
+            make_face_png(path, FACE_FILE)
+            self.face_img = tk.PhotoImage(file=str(FACE_FILE))
+        except Exception as e:
+            self.say("앗, 그 그림은 못 써요: %s" % str(e)[:60], "#c0392b", 8000)
+            return
+        self.set_face("내 그림")
+        self.say("얼굴을 바꿨어요", "#2f7d4f")
 
     # ── 휠 펼치기·접기 (도넛 9칸) ──
     def expand(self):
@@ -413,16 +570,18 @@ class Widget:
             inner = [(mid + r_in * math.cos(math.radians(a1 - (a1 - a0) * k / steps)),
                       mid + r_in * math.sin(math.radians(a1 - (a1 - a0) * k / steps))) for k in range(steps + 1)]
             tag = "btn%d" % i
-            c.create_polygon(*[v for pt in outer + inner for v in pt], fill=color, outline="white", width=1,
+            c.create_polygon(*[v for pt in outer + inner for v in pt], fill=color, outline=RING_GAP, width=1,
                              tags=("btn", tag, tag + "o"))
             if final:
                 am = math.radians((a0 + a1) / 2)
                 rm = (r_in + r_out) / 2 + 5                        # 바깥쪽이 넓어서 글자를 조금 바깥에
                 c.create_text(mid + rm * math.cos(am), mid + rm * math.sin(am), text=WHEEL_LABEL.get(text, text),
-                              fill="white", justify="center", font=("Malgun Gothic", 7, "bold"), tags=("btn", tag))
+                              fill=RING_INK, justify="center", font=("Malgun Gothic", 7, "bold"), tags=("btn", tag))
                 c.tag_bind(tag, "<Button-1>", lambda e, s=site, k=cmd, t=text: self.pick(s, k, t))
-                c.tag_bind(tag, "<Enter>", lambda e, o=tag + "o": (c.itemconfigure(o, outline="#ffe08a", width=3), c.tag_raise(o), c.tag_raise("btntext"), c.configure(cursor="hand2")))
-                c.tag_bind(tag, "<Leave>", lambda e, o=tag + "o": (c.itemconfigure(o, outline="white", width=1), c.configure(cursor="")))
+                c.tag_bind(tag, "<Enter>", lambda e, o=tag + "o": (c.itemconfigure(o, outline=RING_HOVER, width=3), c.tag_raise(o), c.tag_raise("btntext"), c.configure(cursor="hand2")))
+                c.tag_bind(tag, "<Leave>", lambda e, o=tag + "o": (c.itemconfigure(o, outline=RING_GAP, width=1), c.configure(cursor="")))
+        for rr in (r_out + 1, r_in - 1):                                  # 안팎 얇은 금빛 테 (흰 바탕에서도 또렷하게)
+            c.create_oval(mid - rr, mid - rr, mid + rr, mid + rr, outline="#c8b48f", width=1, tags=("btn", "rim"))
         for item in c.find_withtag("btn"):
             if c.type(item) == "text":
                 c.addtag_withtag("btntext", item)
@@ -1177,6 +1336,8 @@ class Widget:
 
     def mainloop(self):
         self.root.after(200, self.keep_visible)      # 저장해 둔 자리가 지금 화면 밖이면 바로 안으로 (크기가 잡힌 뒤)
+        if not load_state().get("face"):             # 처음 켠 선생님 — 얼굴부터 고르게 (11/23)
+            self.root.after(800, lambda: self.choose_face(first=True))
         self.tick()
         self.root.after(WARM_EVERY, self.loop_warm)
         self.root.after(RELAUNCH_EVERY, self.loop_relaunch)

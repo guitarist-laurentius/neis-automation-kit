@@ -62,6 +62,19 @@ FACE = 48
 R_IN, R_OUT = 31, 84
 WHEEL = 2 * R_OUT + 8
 GAP_DEG = 1.6                   # 칸 사이 틈 (도)
+# 궁예 얼굴일 때 가끔 머리 위 말풍선으로 하는 한마디 (11/24 선생님 요청). 앞 셋은 유명한 말투, 나머지는 업무용으로 새로 지음
+GUNGYE_LINES = [
+    "누구인가.. 누가 기침 소리를...",
+    "마구니가 끼었어.",
+    "관심법으로 보았느니라.",
+    "출결은 넣었느냐? 짐의 눈에는 다 보이느니라.",
+    "결재를 미루면 마구니가 끼느니라.",
+    "공문이 쌓였구나... 짐이 다 보고 있다.",
+    "복무는 미리미리 올려 두어라.",
+    "오늘 나이스는 마구니 없이 맑구나.",
+    "누가 감히 퇴근 시간을 묻는가.",
+]
+LINE_EVERY_SEC = 15     # 쉬는 동안 늘 말풍선을 띄우고 이 간격으로 대사를 바꾼다 (11/24 선생님 요청)
 FACES = ["궁예", "곰돌이", "고양이", "병아리", "스마일", "안경 선생님"]   # 고를 수 있는 얼굴 (+ «내 그림»)
 FACE_FILE = BASE / "widget_face.png"         # «내 그림 파일…» 로 고른 그림을 동그랗게 잘라 둔 것
 
@@ -370,6 +383,11 @@ class Widget:
         self.m.add_command(label="반 명단 다시 읽기 (출결용)", command=self.attend_roster)
         self.m.add_command(label="리로스쿨 설정 (주소·아이디·비밀번호)", command=self.open_riro_setup)
         self.m.add_command(label="얼굴 바꾸기", command=self.choose_face)
+        self.lines_var = tk.BooleanVar(value=st.get("lines", True))
+        self.showing_idle = False
+        self.idle_line = GUNGYE_LINES[0]
+        self.m.add_checkbutton(label="궁예 한마디 (쉬는 동안 말풍선)", variable=self.lines_var,
+                               command=lambda: save_state(lines=bool(self.lines_var.get())))
         self.m.add_command(label="물품 검수 (예전 [검수] 단추)", command=self.inspect_check)
         self.m.add_separator()
         self.m.add_command(label="위젯용 크롬 창 닫기", command=self.close_chrome)
@@ -474,6 +492,28 @@ class Widget:
             blush(20, 6)
             c.create_arc(*P(-18, -14, 18, 20), start=200, extent=140, style="arc", outline="#3b2f25", width=W(3), tags=t)
 
+    # ── 궁예 한마디 — 쉬는 동안(접혀 있고, 일 안 하고, 다른 알림 없을 때) 늘 띄우고 15초마다 바꾼다 ──
+    def rotate_line(self):
+        import random
+        last = getattr(self, "idle_line", None)
+        self.idle_line = random.choice([x for x in GUNGYE_LINES if x != last] or GUNGYE_LINES)
+        self.root.after(LINE_EVERY_SEC * 1000, self.rotate_line)
+
+    def idle_ok(self):
+        return (self.face_kind == "궁예" and self.lines_var.get() and not self.expanded
+                and not self.dragging and not self.busy)
+
+    def update_idle_line(self):
+        """tick 마다 부른다. 일하는 중·알림 중이면 손대지 않고, 펼쳤거나 꺼 두었으면 대사를 내린다."""
+        cur = self.status.cget("text")
+        if cur and not self.showing_idle:       # 진행 글자·«짠! 열렸어요» 같은 알림이 떠 있다
+            return
+        if self.idle_ok():
+            if cur != self.idle_line:
+                self.show_status(self.idle_line, "#5a3a2a", idle=True)
+        elif self.showing_idle:
+            self.show_status("", INK)
+
     def choose_face(self, first=False):
         """얼굴 고르기 창 — 누르면 바로 바뀐다. «내 그림 파일…» 은 사진·그림을 동그랗게 잘라 쓴다."""
         tip, fr = self.popup(("위젯 얼굴을 골라 주세요 — 나중에 오른쪽 클릭 → «얼굴 바꾸기» 로 바꿀 수 있어요"
@@ -530,6 +570,8 @@ class Widget:
         if self.expanded or self.dragging:
             return
         self.expanded = True
+        if self.showing_idle:                        # 펼치면 궁예 한마디는 바로 내린다
+            self.show_status("", INK)
         self.place_wheel()
         self.cv.configure(width=WHEEL, height=WHEEL)
         self.cv.delete("all")
@@ -690,8 +732,9 @@ class Widget:
         self.m.tk_popup(e.x_root, e.y_root)
 
     # ── 말풍선 ──
-    def show_status(self, text, color):
-        """상태 글자는 있을 때만 궁예 머리 위 말풍선으로 보인다."""
+    def show_status(self, text, color, idle=False):
+        """상태 글자는 있을 때만 궁예 머리 위 말풍선으로 보인다. idle=True 는 궁예 한마디 (다른 글자가 오면 밀려난다)."""
+        self.showing_idle = bool(text) and idle
         if text:
             changed = self.status.cget("text") != text or self.status.cget("fg") != color
             self.status.configure(text=text, fg=color)
@@ -738,14 +781,21 @@ class Widget:
             rw, rh = (WHEEL, WHEEL) if self.expanded else (FACE, FACE)
             rx, ry = self.root.winfo_x(), self.root.winfo_y()
             top_gap = 6 if self.expanded else 2
-            w, h = self.draw_bubble(tail_up=False)
+            key = (self.status.cget("text"), self.status.cget("fg"))
+            if redraw or getattr(self, "_bubble_key", None) != key:      # 글자가 바뀔 때만 다시 그린다 (깜빡임 없게)
+                self._bubble_size = self.draw_bubble(tail_up=False)
+                self._bubble_key, self._bubble_tail = key, False
+            w, h = self._bubble_size
             tail_up = ry + top_gap - h < 0
-            if tail_up:
-                w, h = self.draw_bubble(tail_up=True)
-            x =rx + rw // 2 - w // 2
+            if tail_up != self._bubble_tail:
+                self._bubble_size = w, h = self.draw_bubble(tail_up=tail_up)
+                self._bubble_tail = tail_up
+            x = rx + rw // 2 - w // 2
             y = (ry + rh - top_gap) if tail_up else (ry + top_gap - h)
-            self.bubble.geometry("%dx%d+%d+%d" % (w, h, *fit_on_screen(x, y, w, h)))
-            self.bubble.attributes("-topmost", True)
+            geo = "%dx%d+%d+%d" % (w, h, *fit_on_screen(x, y, w, h))
+            if self.bubble.geometry() != geo:                          # 위젯 자리를 늘 따라간다 (처음 뜰 땐 x=0 이었다 — 11/24)
+                self.bubble.geometry(geo)
+                self.bubble.attributes("-topmost", True)
         except Exception as e:
             log_line("widget  말풍선 오류 %r" % e)
 
@@ -762,6 +812,9 @@ class Widget:
             if self.status.cget("text").startswith(self._shown_busy):
                 self.show_status("", INK)
             self._shown_busy = None
+        else:
+            self.update_idle_line()                  # 쉬는 중이면 궁예 한마디, 펼쳤으면 내린다
+        self.place_bubble()                          # 떠 있으면 위젯 자리에 맞춘다 (바뀐 게 없으면 아무것도 안 한다)
         k = ctypes.windll.kernel32
         if self.ev_show and k.WaitForSingleObject(wt.HANDLE(self.ev_show), 0) == 0:
             self.come_back()
@@ -1336,6 +1389,7 @@ class Widget:
 
     def mainloop(self):
         self.root.after(200, self.keep_visible)      # 저장해 둔 자리가 지금 화면 밖이면 바로 안으로 (크기가 잡힌 뒤)
+        self.rotate_line()                           # 궁예 한마디 (궁예 얼굴·켜 둔 때, 쉬는 동안만 보인다)
         if not load_state().get("face"):             # 처음 켠 선생님 — 얼굴부터 고르게 (11/23)
             self.root.after(800, lambda: self.choose_face(first=True))
         self.tick()

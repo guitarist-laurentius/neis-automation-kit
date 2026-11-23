@@ -3,6 +3,7 @@
 
   .\\.venv\\Scripts\\pythonw.exe widget\\바로가기위젯.pyw      (설정하면 바탕화면 바로가기가 생긴다)
 
+  휠 런처 (11/23): 평소엔 궁예 얼굴만 떠 있고, 마우스를 올리면 아래 단추가 12시부터 시계 방향으로 둥글게 펼쳐진다. 얼굴을 끌어 옮긴다.
   [나이스] [출결] [출결마감] [에듀파인] [물품구입] [문서등록대장] [공람] [검수] [복무]  — 나이스·에듀파인·물품구입·문서등록대장·공람은 누르면 인증서 자동 로그인까지 해서 그 화면을 맨 앞에 띄운다.
   [물품구입]: 업무를 «학교회계» 로 바꿔 품의/정산 > 품의등록 빈 화면을 열고 제목·개요 틀(설정 punui_title·punui_body)만 채운다. 저장은 안 한다.
   [검수]: 밀린 검사검수 건을 조회해 목록을 보여 주고, [등록하기]를 눌러야 등록한다 (edufine_inspect.py --go).
@@ -49,7 +50,17 @@ BTNS = [("나이스", "neis", "open", "#1b6fb5"),
         ("에듀파인", "edufine", "main", "#2f7d4f"),
         ("물품구입", "edufine", "punui", "#1f7a7a"),      # 학교회계 → 품의등록 빈 화면 + 제목·개요 틀 (저장 안 함)
         ("문서등록대장", "edufine", "open", "#8a5a2b"), ("공람", "edufine", "cnrs", "#6b4fb5"),
-        ("검수", "inspect", "check", "#d63a30"), ("복무", "bokmu", "form", "#c2417a")]
+        ("리로스쿨", "riro", "open", "#e0742a"),          # 11/23: 검수 자리에 — 리로스쿨 아이디·비밀번호 자동 로그인
+        ("복무", "bokmu", "form", "#c2417a")]
+# 휠 런처 크기 (11/23): 얼굴 창 FACE, 펼친 휠 창 WHEEL, 도넛 안·바깥 반지름 R_IN·R_OUT, 얼굴 배율 SCALE
+# 처음엔 동그라미 단추였는데 너무 넓어서 반 크기 + 도넛 9칸으로 바꿨다 (11/23 선생님 요청)
+KEY = "#ff00fe"                 # 이 색은 투명 + 클릭 통과 (그림에 쓰지 않는다)
+SCALE = 0.5
+FACE = 48
+R_IN, R_OUT = 31, 84
+WHEEL = 2 * R_OUT + 8
+GAP_DEG = 1.6                   # 칸 사이 틈 (도)
+WHEEL_LABEL = {"리로스쿨": "리로\n스쿨", "출결마감": "출결\n마감", "에듀파인": "에듀\n파인", "물품구입": "물품\n구입", "문서등록대장": "문서\n등록대장"}
 ATTEND = HERE.parent / "attendance_quick.py"       # 키트의 «한 줄 문장 → 일일출결관리» (풀이 / 넣기 / 명단)
 MONTH_CLOSE = HERE.parent / "month_close.py"       # 키트의 월 출결마감 (일마감 + 월마감 한 번에)
 INSPECT = HERE.parent / "edufine_inspect.py"      # 키트의 물품 검사검수 (조회만 / --go 등록)
@@ -273,12 +284,15 @@ class Widget:
     def __init__(self):
         st = load_state()
         self.root = tk.Tk()
+        # pythonw 라 화면 쪽 오류는 아무 데도 안 보인다 — 기록에 남기고 막대에 알린다 (11/23)
+        self.root.report_callback_exception = lambda et, ev, tb: (
+            log_line("화면 오류 %s: %s" % (et.__name__, ev)), self.say("앗, 위젯 오류 (widget.log 참고)", "#c0392b", 8000))
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         sw = self.root.winfo_screenwidth()
         self.root.geometry("+%d+%d" % (st.get("x", sw - 470), st.get("y", 12)))
         self.prewarm = st.get("prewarm", False)   # 기본 끔 — 누르기 전에 창이 뜨면 «안 누른 문서등록대장이 켜진다»로 보인다 (2026-10-23)
-        self.locks = {"neis": threading.Lock(), "edufine": threading.Lock(), "inspect": threading.Lock()}
+        self.locks = {"neis": threading.Lock(), "edufine": threading.Lock(), "inspect": threading.Lock(), "riro": threading.Lock()}
         self.busy = None
         self.note = ("", INK)
         self.dragging = False
@@ -288,27 +302,32 @@ class Widget:
         self.ev_show = k.CreateEventW(None, False, False, SHOW_EVENT)   # 자동 리셋
         self.ev_ack = k.CreateEventW(None, False, False, ACK_EVENT)
 
-        fr = tk.Frame(self.root, bg=BG, highlightbackground=LINE, highlightthickness=1)
-        fr.pack()
-        grip = tk.Label(fr, text="⋮", bg=BG, fg="#b5a593", font=("Malgun Gothic", 12), cursor="fleur", padx=4)
-        grip.pack(side="left", fill="y")
-        self.buttons = {}
-        for text, site, cmd, color in BTNS:
-            b = tk.Label(fr, text=text, bg=BG, fg=color, font=("Malgun Gothic", 10, "bold"), padx=9, pady=6, cursor="hand2")
-            b.pack(side="left")
-            b.bind("<Button-1>", lambda e, s=site, c=cmd, t=text: self.click(s, c, t))
-            b.bind("<Enter>", lambda e, w=b: w.configure(bg="#f3e9da"))
-            b.bind("<Leave>", lambda e, w=b: w.configure(bg=BG))
-            self.buttons[text] = b
-        self.status = tk.Label(fr, text="", bg=BG, fg="#8a7a68", font=("Malgun Gothic", 9), padx=6)
-        self.spacer = tk.Label(fr, text=" ", bg=BG, font=("Malgun Gothic", 12), padx=4)   # 왼쪽 ⋮ 와 같은 폭 → 좌우 대칭
-        self.spacer.pack(side="left", fill="y")
-        for w in (fr, grip):
-            w.bind("<ButtonPress-1>", self.press)
-            w.bind("<B1-Motion>", self.drag)
-            w.bind("<ButtonRelease-1>", self.release)
-        for w in (fr, grip, self.status, *self.buttons.values()):
-            w.bind("<Button-3>", self.menu)
+        # ── 휠 런처 (11/23 선생님 요청): 평소엔 궁예 얼굴만, 마우스를 올리면 단추가 둥글게 펼쳐진다 ──
+        # 창 바탕을 KEY 색으로 칠하고 그 색을 투명 + 클릭 통과로 만든다 → 동그란 얼굴·단추만 보인다
+        self.root.configure(bg=KEY)
+        self.root.attributes("-transparentcolor", KEY)
+        self.cv = tk.Canvas(self.root, width=FACE, height=FACE, bg=KEY, highlightthickness=0, bd=0)
+        self.cv.pack()
+        self.expanded = False
+        self.home = fit_on_screen(int(st.get("x", sw - FACE - 40)), int(st.get("y", 12)), FACE, FACE)   # 얼굴 창 왼쪽 위
+        self.root.geometry("%dx%d+%d+%d" % (FACE, FACE, *self.home))
+        self.draw_face(FACE // 2, FACE // 2)
+        self.cv.tag_bind("face", "<Enter>", lambda e: self.expand())
+        self.cv.tag_bind("face", "<ButtonPress-1>", self.press)
+        self.cv.tag_bind("face", "<B1-Motion>", self.drag)
+        self.cv.tag_bind("face", "<ButtonRelease-1>", self.release)
+        self.cv.bind("<Button-3>", self.menu)
+        # 상태 말풍선 — 궁예 머리 위, 꼬리가 궁예를 가리킨다 (11/23 선생님 요청). 글자가 있을 때만 보인다
+        self.bubble = tk.Toplevel(self.root)
+        self.bubble.overrideredirect(True)
+        self.bubble.attributes("-topmost", True)
+        self.bubble.configure(bg=KEY)
+        self.bubble.attributes("-transparentcolor", KEY)
+        self.bcv = tk.Canvas(self.bubble, bg=KEY, highlightthickness=0, bd=0)
+        self.bcv.pack()
+        self.bcv.bind("<Button-3>", self.menu)
+        self.status = tk.Label(self.bubble, text="")    # 글자·색 보관용 (화면엔 안 붙인다)
+        self.bubble.withdraw()
 
         self.m = tk.Menu(self.root, tearoff=0, font=("Malgun Gothic", 9))
         self.m.add_command(label="인증서 설정 (처음 한 번)", command=self.open_setup)
@@ -316,23 +335,160 @@ class Widget:
         self.m.add_checkbutton(label="미리 열어두기 (빠른 클릭)", variable=self.prewarm_var, command=self.toggle_prewarm)
         self.m.add_command(label="지금 미리 열어두기", command=lambda: self.warm_all(True))
         self.m.add_command(label="반 명단 다시 읽기 (출결용)", command=self.attend_roster)
+        self.m.add_command(label="리로스쿨 설정 (주소·아이디·비밀번호)", command=self.open_riro_setup)
+        self.m.add_command(label="물품 검수 (예전 [검수] 단추)", command=self.inspect_check)
         self.m.add_separator()
         self.m.add_command(label="위젯용 크롬 창 닫기", command=self.close_chrome)
         self.m.add_command(label="위젯 끄기", command=self.root.destroy)
 
-    # ── 끌기 ──
+    # ── 궁예 얼굴 (그림 파일 없이 캔버스로 그린다: 대머리 · 왼쪽 눈 안대 · 볼터치) ──
+    def draw_face(self, x, y, s=SCALE):
+        """원래 크기(반지름 34) 기준 좌표에 배율 s 를 곱해 그린다. 선 굵기도 같이 줄인다."""
+        c, t = self.cv, "face"
+
+        def P(*xy):
+            return [x + v * s if i % 2 == 0 else y + v * s for i, v in enumerate(xy)]
+
+        def W(w):
+            return max(1, round(w * s))
+        r = 34
+        c.create_oval(*P(-30, 22, 30, 62), fill="#8b6f4e", outline="#6e573c", width=W(2), tags=t)       # 승복 어깨
+        c.create_polygon(*P(-9, 26, 0, 40, 9, 26), fill="#f3e6cf", outline="", tags=t)                  # 옷깃
+        for sx in (-1, 1):                                                                              # 귀
+            c.create_oval(*P(sx * (r - 3) - 7, -6, sx * (r - 3) + 7, 10), fill="#f4cfae", outline="#d9a982", width=W(2), tags=t)
+        c.create_oval(*P(-r, -r - 4, r, r - 4), fill="#f7dcc2", outline="#d9a982", width=W(2), tags=t)  # 머리
+        c.create_oval(*P(-20, -30, -6, -22), fill="#fff4e8", outline="", tags=t)                        # 대머리 반짝
+        c.create_line(*P(-13, -4, 20, -34), fill="#2b2b2b", width=W(3), tags=t)                          # 안대 끈
+        c.create_line(*P(-13, -4, -r + 1, -2), fill="#2b2b2b", width=W(3), tags=t)
+        c.create_oval(*P(-22, -12, -4, 4), fill="#2b2b2b", outline="#111111", tags=t)                   # 안대
+        c.create_line(*P(4, -16, 20, -12), fill="#4a3b30", width=W(4), capstyle="round", tags=t)         # 눈썹 (근엄)
+        c.create_oval(*P(7, -9, 17, 3), fill="#2b2b2b", outline="", tags=t)                             # 눈
+        c.create_oval(*P(9, -7, 13, -3), fill="white", outline="", tags=t)
+        for bx in (-18, 18):                                                                            # 볼터치
+            c.create_oval(*P(bx - 7, 7, bx + 7, 13), fill="#f7a8a8", outline="", tags=t)
+        c.create_arc(*P(-8, 4, 8, 18), start=200, extent=140, style="arc", outline="#8a4b3a", width=W(2), tags=t)  # 입
+
+    # ── 휠 펼치기·접기 (도넛 9칸) ──
+    def expand(self):
+        if self.expanded or self.dragging:
+            return
+        self.expanded = True
+        self.place_wheel()
+        self.cv.configure(width=WHEEL, height=WHEEL)
+        self.cv.delete("all")
+        self.draw_face(WHEEL // 2, WHEEL // 2)
+        self.grow(0)
+        self.place_bubble()
+        self.root.after(150, self.watch_leave)
+
+    def place_wheel(self):
+        """펼친 휠 창을 얼굴 가운데에 맞춘다. 화면 끝이면 휠을 안쪽으로 조금 민다."""
+        hx, hy = self.home
+        cx, cy = hx + FACE // 2, hy + FACE // 2
+        x, y = fit_on_screen(cx - WHEEL // 2, cy - WHEEL // 2, WHEEL, WHEEL)
+        self.root.geometry("%dx%d+%d+%d" % (WHEEL, WHEEL, x, y))
+
+    def grow(self, step):
+        """도넛을 얼굴 쪽에서 바깥으로 5번에 나눠 펼친다."""
+        if not self.expanded:
+            return
+        self.cv.delete("btn")
+        frac = (step + 1) / 5
+        self.draw_ring(R_IN, R_IN + (R_OUT - R_IN) * frac, final=step >= 4)
+        if step < 4:
+            self.root.after(22, self.grow, step + 1)
+
+    def draw_ring(self, r_in, r_out, final):
+        """도넛을 단추 수만큼 칸으로 나눠 그린다. 12시부터 시계 방향, 칸 사이엔 흰 틈."""
+        import math
+        c, mid = self.cv, WHEEL // 2
+        n = len(BTNS)
+        span = 360 / n
+        for i, (text, site, cmd, color) in enumerate(BTNS):
+            a0 = -90 - span / 2 + span * i + GAP_DEG / 2           # 첫 칸이 12시 한가운데에 오게
+            a1 = a0 + span - GAP_DEG
+            steps = 18                                             # 바깥 테두리가 각지지 않게
+            outer = [(mid + r_out * math.cos(math.radians(a0 + (a1 - a0) * k / steps)),
+                      mid + r_out * math.sin(math.radians(a0 + (a1 - a0) * k / steps))) for k in range(steps + 1)]
+            inner = [(mid + r_in * math.cos(math.radians(a1 - (a1 - a0) * k / steps)),
+                      mid + r_in * math.sin(math.radians(a1 - (a1 - a0) * k / steps))) for k in range(steps + 1)]
+            tag = "btn%d" % i
+            c.create_polygon(*[v for pt in outer + inner for v in pt], fill=color, outline="white", width=1,
+                             tags=("btn", tag, tag + "o"))
+            if final:
+                am = math.radians((a0 + a1) / 2)
+                rm = (r_in + r_out) / 2 + 5                        # 바깥쪽이 넓어서 글자를 조금 바깥에
+                c.create_text(mid + rm * math.cos(am), mid + rm * math.sin(am), text=WHEEL_LABEL.get(text, text),
+                              fill="white", justify="center", font=("Malgun Gothic", 7, "bold"), tags=("btn", tag))
+                c.tag_bind(tag, "<Button-1>", lambda e, s=site, k=cmd, t=text: self.pick(s, k, t))
+                c.tag_bind(tag, "<Enter>", lambda e, o=tag + "o": (c.itemconfigure(o, outline="#ffe08a", width=3), c.tag_raise(o), c.tag_raise("btntext"), c.configure(cursor="hand2")))
+                c.tag_bind(tag, "<Leave>", lambda e, o=tag + "o": (c.itemconfigure(o, outline="white", width=1), c.configure(cursor="")))
+        for item in c.find_withtag("btn"):
+            if c.type(item) == "text":
+                c.addtag_withtag("btntext", item)
+        c.tag_raise("btntext")
+        c.tag_raise("face")
+
+    def pick(self, site, cmd, text):
+        self.collapse()
+        self.click(site, cmd, text)
+
+    def watch_leave(self):
+        """마우스가 휠 밖으로 나가 0.5초 지나면 접는다 (투명한 곳은 클릭이 통과해서 <Leave> 가 들쑥날쑥하다 — 거리로 본다)."""
+        if not self.expanded:
+            return
+        if not self.dragging:
+            px, py = self.root.winfo_pointerxy()
+            cx = self.root.winfo_x() + WHEEL // 2
+            cy = self.root.winfo_y() + WHEEL // 2
+            far = (px - cx) ** 2 + (py - cy) ** 2 > (R_OUT + 12) ** 2
+            self.away = (getattr(self, "away", 0) + 1) if far else 0
+            if self.away >= 4:                     # 120ms × 4 ≈ 0.5초
+                self.collapse()
+                return
+        self.root.after(120, self.watch_leave)
+
+    def collapse(self):
+        if not self.expanded:
+            return
+        self.expanded = False
+        self.away = 0
+        self.cv.delete("all")
+        self.cv.configure(width=FACE, height=FACE, cursor="")
+        self.root.geometry("%dx%d+%d+%d" % (FACE, FACE, *self.home))
+        self.draw_face(FACE // 2, FACE // 2)
+        self.place_bubble()
+
+    # ── 끌기 (얼굴을 잡고) — 접혀 있든 펼쳐져 있든 그대로 옮긴다 ──
     def press(self, e):
-        self.dragging = True
         self.sx, self.sy = e.x_root, e.y_root
-        self.wx, self.wy = self.root.winfo_x(), self.root.winfo_y()
+        self.moved = False
+        self.hx0, self.hy0 = self.home
+        self.wx0, self.wy0 = self.root.winfo_x(), self.root.winfo_y()
 
     def drag(self, e):
-        self.root.geometry("+%d+%d" % (self.wx + e.x_root - self.sx, self.wy + e.y_root - self.sy))
+        dx, dy = e.x_root - self.sx, e.y_root - self.sy
+        if not self.moved and abs(dx) + abs(dy) < 5:
+            return                              # 살짝 떨린 것은 끌기가 아니다
+        self.moved = self.dragging = True
+        self.home = (self.hx0 + dx, self.hy0 + dy)
+        self.root.geometry("+%d+%d" % (self.wx0 + dx, self.wy0 + dy))   # 펼친 휠이면 휠째로
+        self.place_bubble()
 
     def release(self, e):
+        if not getattr(self, "moved", False):  # 그냥 누른 것 — 펼쳐져 있으면 접고, 접혀 있으면 펼친다
+            self.collapse() if self.expanded else self.expand()
+            return
         self.dragging = False
-        self.keep_visible()                      # 화면 밖으로 끌어 놓았으면 안으로 되돌린 뒤 저장
-        save_state(x=self.root.winfo_x(), y=self.root.winfo_y())
+        if self.expanded:                        # 펼친 채 놓았으면 얼굴 자리를 휠 가운데로 맞춘다
+            self.home = (self.root.winfo_x() + WHEEL // 2 - FACE // 2, self.root.winfo_y() + WHEEL // 2 - FACE // 2)
+            self.home = fit_on_screen(*self.home, FACE, FACE)
+            self.place_wheel()
+        else:
+            self.keep_visible()                  # 화면 밖으로 끌어 놓았으면 안으로 되돌린 뒤 저장
+            self.home = (self.root.winfo_x(), self.root.winfo_y())
+        save_state(x=self.home[0], y=self.home[1])
+        self.place_bubble()
 
     # ── 안 보이게 되지 않게 ──
     def hwnd(self):
@@ -356,6 +512,9 @@ class Widget:
             if (nx, ny) != (x, y):
                 self.root.geometry("+%d+%d" % (nx, ny))
                 log_line("widget  화면 밖(%d,%d) → 안(%d,%d)으로 옮김" % (x, y, nx, ny))
+                if not getattr(self, "expanded", False):
+                    self.home = (nx, ny)
+                    self.place_bubble()
             if h and (raise_ or not (u.GetWindowLongW(h, -20) & 0x8)):    # -20 = GWL_EXSTYLE, 8 = WS_EX_TOPMOST
                 self.root.attributes("-topmost", True)
                 u.SetWindowPos(wt.HWND(h), wt.HWND(-1), 0, 0, 0, 0, 0x0013)   # HWND_TOPMOST · NOSIZE|NOMOVE|NOACTIVATE
@@ -373,14 +532,63 @@ class Widget:
 
     # ── 말풍선 ──
     def show_status(self, text, color):
-        """상태 글자는 있을 때만 막대에 붙인다 (없을 땐 빼서 단추만 남게)."""
+        """상태 글자는 있을 때만 궁예 머리 위 말풍선으로 보인다."""
         if text:
+            changed = self.status.cget("text") != text or self.status.cget("fg") != color
             self.status.configure(text=text, fg=color)
-            if not self.status.winfo_ismapped():
-                self.status.pack(side="left", before=self.spacer)
+            if changed or self.bubble.state() == "withdrawn":
+                self.bubble.deiconify()
+                self.place_bubble(redraw=True)
         else:
             self.status.configure(text="")
-            self.status.pack_forget()
+            self.bubble.withdraw()
+
+    def draw_bubble(self, tail_up):
+        """둥근 말풍선 + 궁예 쪽 꼬리. tail_up=True 면 말풍선이 궁예 아래에 있고 꼬리가 위를 본다."""
+        import tkinter.font as tkfont
+        c = self.bcv
+        c.delete("all")
+        text, color = self.status.cget("text"), self.status.cget("fg")
+        f = tkfont.Font(family="Malgun Gothic", size=9, weight="bold")
+        lines = text.split("\n")
+        tw = max(f.measure(ln) for ln in lines)
+        lh = f.metrics("linespace")
+        w, h, tail, r = min(tw + 22, 360), lh * len(lines) + 12, 9, 10
+        top = tail + 1 if tail_up else 1
+        x0, y0, x1, y1 = 1, top, w + 1, top + h
+        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1,
+               x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+        c.configure(width=w + 3, height=h + tail + 3)
+        c.create_polygon(pts, smooth=True, fill="#fffdf7", outline="#b59a76", width=2)
+        mx = (x0 + x1) // 2
+        if tail_up:
+            c.create_polygon(mx - 7, y0 + 1, mx, y0 - tail, mx + 7, y0 + 1, fill="#fffdf7", outline="")
+            c.create_line(mx - 7, y0, mx, y0 - tail, mx + 7, y0, fill="#b59a76", width=2)
+        else:
+            c.create_polygon(mx - 7, y1 - 1, mx, y1 + tail, mx + 7, y1 - 1, fill="#fffdf7", outline="")
+            c.create_line(mx - 7, y1, mx, y1 + tail, mx + 7, y1, fill="#b59a76", width=2)
+        c.create_text(mx, (y0 + y1) // 2, text=text, fill=color if color != "#8a7a68" else "#5a4636",
+                      font=f, justify="center", width=w - 12)
+        return w + 3, h + tail + 3
+
+    def place_bubble(self, redraw=False):
+        """말풍선은 궁예 머리 위(펼쳐져 있으면 도넛 위) 가운데. 위에 자리가 없으면 아래로 — 꼬리 방향도 바꾼다."""
+        try:
+            if self.bubble.state() == "withdrawn":
+                return
+            rw, rh = (WHEEL, WHEEL) if self.expanded else (FACE, FACE)
+            rx, ry = self.root.winfo_x(), self.root.winfo_y()
+            top_gap = 6 if self.expanded else 2
+            w, h = self.draw_bubble(tail_up=False)
+            tail_up = ry + top_gap - h < 0
+            if tail_up:
+                w, h = self.draw_bubble(tail_up=True)
+            x =rx + rw // 2 - w // 2
+            y = (ry + rh - top_gap) if tail_up else (ry + top_gap - h)
+            self.bubble.geometry("%dx%d+%d+%d" % (w, h, *fit_on_screen(x, y, w, h)))
+            self.bubble.attributes("-topmost", True)
+        except Exception as e:
+            log_line("widget  말풍선 오류 %r" % e)
 
     def say(self, text, color=INK, ms=4000):
         self.show_status(text, color)
@@ -430,7 +638,11 @@ class Widget:
     def click(self, site, cmd, text):
         if self.busy:
             return
-        if not configured():
+        if site == "riro" and not (cfg().get("riro_url") and cfg().get("riro_id")):   # 리로스쿨은 인증서가 없어도 된다
+            self.say("리로스쿨 설정부터 — 검은 창에 주소·아이디·비밀번호", "#c0392b", 8000)
+            self.open_riro_setup()
+            return
+        if site != "riro" and not configured():
             self.say("먼저 오른쪽 클릭 → 인증서 설정", "#c0392b", 6000)
             return
         if site == "inspect":
@@ -517,6 +729,7 @@ class Widget:
     def run_kit(self, script, args, what, timeout=900):
         """키트 스크립트를 돌려 RESULT_JSON(= 또는 공백 뒤)을 돌려준다. 나이스 작업끼리는 겹치지 않게 neis 자물쇠."""
         t0 = time.time()
+        log_line("%s 시작" % what)                  # 시작도 남긴다 — 끝 줄이 없으면 도중에 멈춘 것
         with self.locks["neis"]:
             p = subprocess.run([str(PY), "-X", "utf8", str(script), *args], capture_output=True, text=True,
                                encoding="utf-8", errors="replace", env=ENV, cwd=str(script.parent),
@@ -534,7 +747,9 @@ class Widget:
         다 저장된 뒤에만 비운다 (11/18 선생님 요청)."""
         if text is None:
             text = getattr(self, "attend_text", "")
-        tip, fr = self.popup("출결 — 한 줄에 한 학생. 예) 홍길동 질병지각 4교시 이후 등교\n"
+        tip, fr = self.popup("입력 형식 (한 줄에 한 학생)\n"
+                             "날짜, 이름, 교시, 분류+종류, 사유: 내용\n"
+                             "예) 11월 16일~18일, 홍길동, 7교시부터, 인정조퇴, 사유: 대회 참가\n"
                              "[풀어 보기]를 누르면 어떻게 읽었는지 먼저 보여 드리고, [나이스에 넣기]를 눌러야 들어갑니다.")
         if note:
             tk.Label(fr, text=note, bg=BG, fg="#c0392b", font=("Malgun Gothic", 9), justify="left",
@@ -546,9 +761,12 @@ class Widget:
 
         def keep():
             self.attend_text = box.get("1.0", "end").strip()
-        tk.Label(fr, text="분류: 질병·미인정·출석인정(체험학습) · 종류: 결석·지각·조퇴\n"
+        tk.Label(fr, text="분류: 질병·미인정·출석인정(체험학습) · 종류: 결석·지각·조퇴·결과\n"
+                          "결과 «5,6교시 인정결과»=5·6교시만 빠짐 · «3~5교시 질병결과»\n"
                           "지각 «4교시 이후 등교»=1~4교시 빠짐 · «3교시에 등교»=1~2교시 빠짐 · 조퇴 «4교시 이후 조퇴»=5교시부터\n"
-                          "날짜를 안 적으면 오늘 · «어제» «11/17» · 결석 기간 «11/17~11/19»",
+                          "날짜를 안 적으면 오늘 · «어제» «11/17» «11.17» · 결석 기간 «11/17~11/19» «11.16~18» «16~18일»\n"
+                          "사유는 «사유:» 뒤 줄 끝까지 (안 적으면 비워 둠) · 결석 아니어도 기간이면 그 날마다 같은 교시로\n"
+                          "줄 순서·띄어쓰기는 상관없어요. 못 읽은 날짜는 오늘로 두지 않고 다시 물어요",
                  bg=BG, fg="#8a7a68", font=("Malgun Gothic", 8), justify="left", wraplength=420).pack(padx=12, anchor="w")
         btns = tk.Frame(fr, bg=BG)
         btns.pack(pady=(4, 10))
@@ -582,6 +800,9 @@ class Widget:
         def fn():
             try:
                 r, lines = self.run_kit(ATTEND, ["풀이", text], "attend parse", timeout=60)
+            except Exception as e:                  # 전에는 여기서 말없이 멈췄다 (11/23) — 이유를 보여 주고 기록에 남긴다
+                log_line("attend parse 오류 %s: %s" % (type(e).__name__, e))
+                r, lines = None, ["%s: %s" % (type(e).__name__, e)]
             finally:
                 self.busy = None
             self.root.after(0, self.attend_show, text, r, lines)
@@ -936,6 +1157,12 @@ class Widget:
             self.warm_all(True)
 
     # ── 설정·닫기 ──
+    def open_riro_setup(self):
+        # 비밀번호는 위젯 창이 아니라 검은 창에서 받는다 (화면에 안 보이게, 자격 증명 관리자에만)
+        subprocess.Popen([str(PY), "-X", "utf8", str(HERE / "리로스쿨_설정.py")], cwd=str(HERE), env=ENV,
+                         creationflags=0x00000010)        # CREATE_NEW_CONSOLE
+        self.say("검은 창에서 마쳐 주세요", INK, 8000)
+
     def open_setup(self):
         # 마우스로 고르는 설정 창 (클로드 없이 쓰는 선생님도 같은 창). 검은 창판(바로가기_설정.py)은 클로드 지시서용으로 남겨 둔다
         subprocess.Popen([str(PY.with_name("pythonw.exe")), str(HERE / "바로가기_설정창.pyw")], cwd=str(HERE), env=ENV)
@@ -943,7 +1170,7 @@ class Widget:
 
     def close_chrome(self):
         def fn():
-            for site in ("neis", "edufine"):
+            for site in ("neis", "edufine", "riro"):
                 self.run(site, "close", what="close " + site)
             self.root.after(0, self.say, "닫았어요")
         threading.Thread(target=fn, daemon=True).start()

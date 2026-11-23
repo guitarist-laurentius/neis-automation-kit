@@ -86,6 +86,11 @@ ATTENDANCE_MAP = {
     "미인정조퇴":   ("미인정",  "조퇴"),
     "기타조퇴":     ("기타",    "조퇴"),
     "출석인정조퇴": ("출석인정","조퇴"),
+    # 결과 = 중간 교시만 빠짐. note 는 빠진 교시들 («5,6교시» · «3~5교시») — 그 칸을 하나씩 누른다 (2026-11-23 더함)
+    "질병결과":     ("질병",    "결과"),
+    "미인정결과":   ("미인정",  "결과"),
+    "기타결과":     ("기타",    "결과"),
+    "출석인정결과": ("출석인정","결과"),
 }
 
 # ============================================================
@@ -191,6 +196,8 @@ def _missed_periods(task: dict) -> float:
     jongryu = task["jongryu"]
     if jongryu == "결석":
         return 99  # 하루 전체
+    if jongryu == "결과":
+        return len(parse_gyosi_list(task["note"])) or 50
     g = parse_gyosi_num(task["note"], jongryu)
     if g is None:
         return 50  # 교시 미상이면 중간 순위
@@ -241,6 +248,7 @@ def build_task_map(records: list[dict]) -> dict[date, list[dict]]:
                 "jongryu": att[1],
                 "note":    rec["note"],
                 "label":   rec["att_type"],
+                "reason":  rec.get("reason", ""),   # 위젯 출결에서 «사유:» 를 적었을 때만 (캘린더 출결은 비워 둔다)
             }
             # 같은 학생이라도 분류가 다르면 둘 다 입력 (예: 같은 날 지각+조퇴)
             # — 완전히 동일한 (학생, 분류) 건만 하나로 합친다
@@ -660,6 +668,16 @@ def parse_gyosi_num(note: str, jongryu: str = "") -> int | None:
     return int(nums[-1]) if jongryu == "지각" else int(nums[0])
 
 
+def parse_gyosi_list(note: str) -> list[int]:
+    """결과용 — note 의 빠진 교시 전부. '5,6교시'→[5,6] · '3~5교시'→[3,4,5] · '2교시'→[2]. 못 읽으면 []."""
+    out = []
+    for a, b in re.findall(r"(\d+)\s*(?:[~\-]\s*(\d+))?", note or ""):
+        lo = int(a)
+        hi = int(b) if b else lo
+        out += range(lo, hi + 1) if lo <= hi else []
+    return sorted(set(n for n in out if n >= 1))
+
+
 
 GRID_HEADER_JS = r"""
 () => {
@@ -760,8 +778,25 @@ async def click_magam_cell(page: Page, name: str, number: str, col: int = 2):
     await cell.click(timeout=5000)
 
 
-async def handle_magam_popup(page: Page, gubun: str, jongryu: str):
-    """팝업 열리면 구분/종류 선택 후 적용."""
+async def fill_reason(page: Page, reason: str):
+    """출결마감구분 창의 «사유» 칸에 넣는다 (2026-11-23 실측: 창 안 input[aria-label="사유"] 하나).
+    마스크 칸은 아니지만 cl- 칸이라 fill 대신 눌러서 지우고 친다. 들어간 값을 읽어 확인한다."""
+    box = page.locator('[aria-label="출결마감구분"] input[aria-label="사유"]:visible')
+    if await box.count() == 0:
+        box = page.locator('input[aria-label="사유"]:visible')
+    box = box.last
+    await box.click(timeout=3000)
+    await page.keyboard.press("Control+A")
+    await page.keyboard.press("Delete")
+    await page.keyboard.type(reason, delay=20)
+    await page.wait_for_timeout(150)
+    got = (await box.input_value()).strip()
+    if got != reason.strip():
+        raise RuntimeError(f"사유 칸에 '{reason}' 를 넣었는데 '{got}' 로 보임")
+
+
+async def handle_magam_popup(page: Page, gubun: str, jongryu: str, reason: str = ""):
+    """팝업 열리면 구분/종류 선택 (사유가 있으면 사유도) 후 적용."""
     await page.wait_for_selector("text=출결마감구분", timeout=10_000)
     await page.wait_for_timeout(200)
 
@@ -773,7 +808,9 @@ async def handle_magam_popup(page: Page, gubun: str, jongryu: str):
     await page.get_by_role("radio", name=jongryu).click()
     await page.wait_for_timeout(200)
 
-    # 사유란은 개인정보 우려로 입력하지 않음 (비워둠)
+    # 사유란은 개인정보 우려로 기본은 비워 둔다. 선생님이 위젯 출결에 «사유:» 를 직접 적었을 때만 넣는다 (11/23 요청)
+    if reason:
+        await fill_reason(page, reason)
 
     # 적용
     await page.locator("a").filter(has_text=re.compile(r"^적용$")).click()
@@ -833,12 +870,25 @@ async def enter_student(page: Page, task: dict, day_cols=None) -> tuple[str, str
             print(f"      캘린더 제목을 그날 시간표에 맞게 고친 뒤 다시 돌려주세요.")
             return (FAILED, f"이 날은 {last}교시까지인데 note '{note}' 는 {_g}교시를 가리킴")
 
+    if jongryu == "결과":
+        # 지각·조퇴와 같은 이유로, 교시를 못 읽거나 그날 없는 교시면 아예 손대지 않는다
+        periods = parse_gyosi_list(note)
+        if not periods:
+            print(f"  ❌  {number}번 {name}: 결과인데 note '{note}' 에서 교시를 못 읽어 입력하지 않았습니다.")
+            return (FAILED, f"결과인데 note '{note}' 에서 교시를 못 읽음 (넣으면 그날 저장이 통째로 막힐 수 있어 넣지 않음)")
+        if day_cols:
+            missing = [g for g in periods if gyosi_col_index(g, day_cols) is None]
+            if missing:
+                last = day_last_period(day_cols)
+                print(f"  ⛔  {number}번 {name}: 이 날은 {last}교시까지입니다 — {missing}교시는 없어 입력하지 않았습니다.")
+                return (FAILED, f"이 날은 {last}교시까지인데 note '{note}' 에 없는 교시 {missing}")
+
     applied = False   # 구분·종류가 «들어간» 뒤부터 True — 여기서 터지면 ❌ 가 아니라 ⚠️ 다
 
     try:
         # 1단계: 항상 마감(col=2) 셀 클릭 → 구분/종류 팝업 → 적용
         await click_magam_cell(page, name, number, col=2)
-        await handle_magam_popup(page, gubun, jongryu)
+        await handle_magam_popup(page, gubun, jongryu, task.get("reason", ""))
         applied = True   # 여기까지 왔으면 구분·종류는 화면에 들어갔다
 
         if jongryu in ("조퇴", "지각"):
@@ -860,6 +910,22 @@ async def enter_student(page: Page, task: dict, day_cols=None) -> tuple[str, str
                 await page.wait_for_timeout(300)
             gyosi_label = " 조회" if gyosi_num == 0 else f" {gyosi_num}교시"
             print(f"  ✅  {number}번 {name}: {gubun}/{jongryu}{gyosi_label}")
+        elif jongryu == "결과":
+            # 2단계: 빠진 교시 칸을 하나씩 누른다 (누를 때 창이 다시 뜨면 [적용])
+            for g in parse_gyosi_list(note):
+                col = gyosi_col_index(g, day_cols)
+                row = await pick_student_row(page, name, number)
+                nth = col + 2
+                cell = row.locator(f"> div:nth-child({nth})").locator(".cl-text")
+                if await cell.count() == 0:
+                    cell = row.locator(f"> div:nth-child({nth})")
+                await cell.click(timeout=5000)
+                await page.wait_for_timeout(300)
+                apply_btn = page.locator("a").filter(has_text=re.compile(r"^적용$"))
+                if await apply_btn.count() > 0:
+                    await apply_btn.click()
+                    await page.wait_for_timeout(300)
+            print(f"  ✅  {number}번 {name}: {gubun}/{jongryu} {note}")
         else:
             print(f"  ✅  {number}번 {name}: {gubun}/{jongryu}")
     except Exception as e:

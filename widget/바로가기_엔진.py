@@ -8,7 +8,8 @@
   python 바로가기_엔진.py edufine open              문서등록대장
   python 바로가기_엔진.py edufine cnrs              공람대기
   python 바로가기_엔진.py edufine warm [--launch]   미리 데워 두기
-  python 바로가기_엔진.py neis|edufine close        그 크롬 닫기
+  python 바로가기_엔진.py riro open                 리로스쿨 (아이디·비밀번호 자동 로그인 — 설정은 리로스쿨_설정.py)
+  python 바로가기_엔진.py neis|edufine|riro close   그 크롬 닫기
 
   출력은 STEP <하는 일> / READY / FAIL <이유> 줄 — 위젯이 이 줄만 읽는다.
 
@@ -46,6 +47,9 @@ SITES = {
              "match": ("neis",)},
     "edufine": {"port": int(os.environ.get("WIDGET_EDUFINE_PORT", "9324")), "profile": BASE / "chrome_profile_widget_edufine",
                 "match": ("klef", "eduptl")},
+    # 리로스쿨 (11/23): 아이디·비밀번호 로그인. 주소·아이디는 설정 riro_url·riro_id, 비밀번호는 keyring «riroschool:<아이디>»
+    "riro": {"port": int(os.environ.get("WIDGET_RIRO_PORT", "9326")), "profile": BASE / "chrome_profile_widget_riro",
+             "match": ("riroschool",)},
 }
 COMMON_ARGS = [
     "--profile-directory=Default",
@@ -630,6 +634,80 @@ def edufine_cmd(cmd, launch_ok):
         print("READY", flush=True)
 
 
+# ───────────────────────── 리로스쿨 (sync) ─────────────────────────
+
+def riro_cfg():
+    cfg = json.loads(teacher_config.CONFIG_FILE.read_text(encoding="utf-8")) if teacher_config.CONFIG_FILE.exists() else {}
+    url, rid = cfg.get("riro_url"), cfg.get("riro_id")
+    if not url or not rid:
+        raise RuntimeError("리로스쿨 설정이 없어요 — 오른쪽 클릭 → «리로스쿨 설정»")
+    import keyring
+    pw = keyring.get_password(teacher_config.KEYRING_SERVICE, "riroschool:" + rid)
+    if not pw:
+        raise RuntimeError("리로스쿨 비밀번호가 저장돼 있지 않아요 — 오른쪽 클릭 → «리로스쿨 설정»")
+    return url, rid, pw
+
+
+def riro_pw_box(page):
+    return page.locator("input[type=password]:visible")
+
+
+def riro_login(page, rid, pw):
+    """아이디(#id)·비밀번호(#pw) 칸을 채우고 [로그인] 단추 (2026-11-23 실측: 단추가 type=button 이라 Enter 로는 안 넘어갈 수 있다).
+    비밀번호 칸이 사라지면 로그인된 것."""
+    box = riro_pw_box(page).first
+    form = box.locator("xpath=ancestor::form[1]")
+    scope = form if form.count() else page
+    idbox = page.locator("input#id:visible")
+    if idbox.count() == 0:
+        idbox = scope.locator("input[type=text]:visible, input[type=email]:visible, input:not([type]):visible")
+    idbox = idbox.first
+    step("로그인 중")
+    idbox.click()
+    idbox.fill(rid)
+    box.click()
+    box.fill(pw)
+    btn = scope.locator("button:visible, input[type=submit]:visible, a:visible").filter(has_text="로그인")
+    if btn.count():
+        btn.first.click()
+    else:
+        box.press("Enter")
+    for _ in range(40):                          # 최대 20초
+        page.wait_for_timeout(500)
+        try:
+            if riro_pw_box(page).count() == 0:
+                return
+        except Exception:
+            pass                                 # 넘어가는 중
+    raise RuntimeError("로그인이 안 됐어요 — 아이디·비밀번호를 확인해 주세요 (오른쪽 클릭 → «리로스쿨 설정»)")
+
+
+def riro_cmd(cmd, launch_ok):
+    from playwright.sync_api import sync_playwright
+    url, rid, pw = riro_cfg()
+    ensure_chrome("riro")
+    with sync_playwright() as p:
+        browser = connect_sync(p, SITES["riro"]["port"])
+        ctx = browser.contexts[0]
+        page = pick_page(ctx, "riro") or ctx.new_page()
+        page.on("dialog", lambda d: d.accept())  # «로그인 되었습니다» 같은 알림창
+        if "riroschool" not in page.url:
+            step("리로스쿨 여는 중")
+            goto(page, url, wait_until="domcontentloaded")
+            page.wait_for_timeout(800)
+        if riro_pw_box(page).count() == 0 and page.locator("a:visible", has_text="로그인").count():
+            # 첫 화면엔 로그인 칸이 없고 «로그인» 단추만 있다 — 그 단추가 가는 로그인 주소로 간다 (11/23 실측)
+            step("로그인 화면 여는 중")
+            goto(page, url.rstrip("/") + "/user.php?action=signin", wait_until="domcontentloaded")
+            page.wait_for_timeout(800)
+        if riro_pw_box(page).count():
+            riro_login(page, rid, pw)
+        else:
+            step("이미 로그인돼 있음")
+        to_front_sync(page)
+        print("READY", flush=True)
+
+
 def close_cmd(site):
     port = SITES[site]["port"]
     if not alive(port):
@@ -652,6 +730,8 @@ def main():
             close_cmd(site)
         elif site == "neis":
             asyncio.run(neis_cmd(cmd, launch_ok))
+        elif site == "riro":
+            riro_cmd(cmd, launch_ok)
         else:
             edufine_cmd(cmd, launch_ok)
     except BaseException as e:
